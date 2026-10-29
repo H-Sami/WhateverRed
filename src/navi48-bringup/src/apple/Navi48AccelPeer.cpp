@@ -2978,6 +2978,18 @@ static void *hook_new_resource(void *accel) {
 // (defined with the hook, below). Guards: the two slide anchors and slot 239 == IOGraphicsAccelerator2::newUserClient.
 static void ucp_install_at_start(IOService *accel, void **vt, void **copy);
 
+// "Accel" within the first n bytes of s. A local bounded search: strnstr is not
+// exported to kexts on 26.7.2 (kmutil load: Failed to bind '_strnstr').
+static bool name_has_accel(const char *s, size_t n) {
+    static const char k[] = "Accel";
+    for (size_t i = 0; i + 5 <= n && s[i]; i++) {
+        size_t j = 0;
+        while (j < 5 && s[i + j] == k[j]) j++;
+        if (j == 5) return true;
+    }
+    return false;
+}
+
 bool Navi48AccelPeer::tryPatchAcceleratorStop() {
     if (mStopPatched) return true;
 
@@ -3010,7 +3022,7 @@ bool Navi48AccelPeer::tryPatchAcceleratorStop() {
             }
             // Keep a few nearby names so a miss is diagnosable from one run.
             const char *cls = e->getMetaClass()->getClassName();
-            if (cls && strnstr((char *)cls, "Accel", 64) && strlen(seen) + strlen(cls) + 2 < sizeof(seen)) {
+            if (cls && name_has_accel(cls, 64) && strlen(seen) + strlen(cls) + 2 < sizeof(seen)) {
                 strlcat(seen, cls, sizeof(seen));
                 strlcat(seen, " ", sizeof(seen));
             }
