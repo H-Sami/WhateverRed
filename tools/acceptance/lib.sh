@@ -64,6 +64,28 @@ kext_path_problem() {
     esac
 }
 
+# kmutil loads only a root:wheel-owned bundle, and pc may chown exactly one path, both ways
+# (/etc/sudoers.d/whateverred-chown). The load path and the rule must agree, so this is fixed.
+STAGED_KEXT=/Users/pc/navi-stage/kext/Navi48Bringup.kext
+
+# kext_chown_cmd root|pc <kext>: the remote command handing <kext> to root (0:0, for the load) or
+# back to pc (501:20, for restaging). Exit 1 and print nothing for any other owner or path.
+kext_chown_cmd() {
+    local own
+    case "$1" in root) own=0:0 ;; pc) own=501:20 ;; *) return 1 ;; esac
+    [ "$2" = "$STAGED_KEXT" ] || return 1
+    echo "sudo -n /usr/sbin/chown -R $own $2"
+}
+
+# kext_restage_cmd <built kext on the Mac> <staged kext>: the remote command replacing the staged
+# bundle with a copy of a build. The old bundle is root-owned after a load, so pc gets it back first.
+kext_restage_cmd() {
+    local back
+    [ -z "$(kext_path_problem "$1")" ] || return 1
+    back=$(kext_chown_cmd pc "$2") || return 1
+    echo "if test -e $2; then $back || exit 1; rm -rf $2 || exit 1; fi; mkdir -p ${2%/*} && cp -R $1 $2"
+}
+
 # disarmed_args <boot-args>: the args with every navi48* and every NVIDIA arg removed, order kept.
 disarmed_args() {
     local t out=""
@@ -178,6 +200,7 @@ ppm_alter() {
 # Files in a cycle directory (written by accept.sh):
 #   armed-bootargs.txt      kern.bootargs of the armed boot     ssh-return.txt   seconds, or "timeout"
 #   nvram-after-disarm.txt  NVRAM boot-args after the disarm    kmutil-load.{txt,rc}  load output, exit code
+#   kext-chown.{txt,rc}     output and exit code of `sudo -n chown -R 0:0 <kext>` just before the load
 #   loaded.txt              kmutil showloaded lines for the kext
 #   safety-{before,after}.txt  "aux <AuxKC md5>" + "boot-paths <navi48 kexts/plists found in boot paths>"
 #   alive.txt               kern.boottime seconds before the load, then after (missing line = no answer)
@@ -223,6 +246,11 @@ crit_never_at_boot() {
 }
 crit_kext_loaded() {
     local rc why
+    rc=$(_first_line "$1/kext-chown.rc")
+    if [ -n "$rc" ] && [ "$rc" != 0 ]; then
+        echo "FAIL sudo -n refused chown -R 0:0 $STAGED_KEXT (is /etc/sudoers.d/whateverred-chown installed?): $(_first_line "$1/kext-chown.txt")"
+        return
+    fi
     rc=$(_first_line "$1/kmutil-load.rc")
     if [ "$rc" = 0 ] && [ -s "$1/loaded.txt" ]; then echo "PASS $(_first_line "$1/loaded.txt")"; return; fi
     # the specific reason (ownership, approval, ...) comes after kmutil's generic "Validating ... failed:"

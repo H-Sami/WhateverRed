@@ -153,6 +153,27 @@ echo 0 > "$C/kmutil-load.rc"; echo "com.navi48.bringup (0.0.664)" > "$C/loaded.t
 check_match "kext-loaded passes" "^PASS" "$(evaluate_criterion kext-loaded "$C")"
 echo 30 > "$C/kmutil-load.rc"; : > "$C/loaded.txt"; printf 'Validating extension failed: Kext x at /p:\n\nFilesystem error: Invalid ownership (501:20)\n' > "$C/kmutil-load.txt"
 check_match "kext-loaded fails with kmutil's reason" "^FAIL .*rc 30.*Invalid ownership" "$(evaluate_criterion kext-loaded "$C")"
+printf 'sudo: a password is required\n' > "$C/kext-chown.txt"; echo 1 > "$C/kext-chown.rc"
+check_match "kext-loaded names a refused chown before kmutil's reason" \
+    "^FAIL sudo -n refused chown -R 0:0 .*whateverred-chown.*password is required" "$(evaluate_criterion kext-loaded "$C")"
+: > "$C/kext-chown.txt"; echo 0 > "$C/kext-chown.rc"
+check_match "a chown that worked leaves kmutil's reason" "^FAIL .*rc 30" "$(evaluate_criterion kext-loaded "$C")"
+rm -f "$C/kext-chown.txt" "$C/kext-chown.rc"
+
+# --- kext ownership: chown commands (sudoers allows exactly these two) ------------------------------
+K=/Users/pc/navi-stage/kext/Navi48Bringup.kext
+check "chown to root for the load" "sudo -n /usr/sbin/chown -R 0:0 $K" "$(kext_chown_cmd root "$K")"
+check "chown back to pc for restaging" "sudo -n /usr/sbin/chown -R 501:20 $K" "$(kext_chown_cmd pc "$K")"
+check "no other owner" "" "$(kext_chown_cmd 0:80 "$K")"
+kext_chown_cmd 0:80 "$K" >/dev/null; check "other owner is an error" 1 "$?"
+check "no other path (sudoers would refuse it)" "" "$(kext_chown_cmd root /Users/pc/other/Navi48Bringup.kext)"
+R=$(kext_restage_cmd /Users/pc/src/WhateverRed/src/navi48-bringup/build/Navi48Bringup.kext "$K")
+check_match "restage hands the old bundle back to pc first" "^if test -e $K; then sudo -n /usr/sbin/chown -R 501:20 $K" "$R"
+check_match "then replaces it with a copy of the build" \
+    "rm -rf $K .*cp -R /Users/pc/src/WhateverRed/src/navi48-bringup/build/Navi48Bringup.kext $K" "$R"
+check_match "and stops if the chown is refused" "chown -R 501:20 $K \|\| exit" "$R"
+check "restage refuses a source with spaces" "" "$(kext_restage_cmd '/Users/pc/my build/N.kext' "$K")"
+
 cp "$TMP/base.ppm" "$C/console-before.ppm"; cp "$TMP/swap.ppm" "$C/console-after.ppm"
 check_match "console criterion uses console_compare" "^FAIL colour" "$(evaluate_criterion console "$C")"
 check_match "an unknown criterion fails loudly" "^FAIL unknown criterion" "$(evaluate_criterion bogus "$C")"

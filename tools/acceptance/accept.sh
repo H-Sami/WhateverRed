@@ -5,14 +5,15 @@
 #     --cycles N            cold-boot cycles (default 3); the run passes only if every cycle passes
 #     --stage N             arm with navi48-stage=N as well (the ladder target)
 #     --arg NAME=VALUE      an extra LADDER boot-arg for the armed boot (repeatable; post-ladder refused)
-#     --kext PATH           the staged kext on the Mac (default /Users/pc/navi-stage/kext/Navi48Bringup.kext):
-#                           absolute, under /Users/, root:wheel-owned (kmutil refuses anything else)
+#     --restage BUILD       first replace the staged kext (/Users/pc/navi-stage/kext/Navi48Bringup.kext, fixed:
+#                           the sudoers chown rule names it) with a copy of BUILD, a .kext path on the Mac
 #     --expect KEY=VALUE    an IORegistry value the Navi48Bringup instance must publish (repeatable);
 #     --expect KEY~REGEX      KEY~REGEX matches with grep -E instead
 #     --expect-log REGEX    a kernel log line (Navi48Bringup lines, prefix stripped) must match (repeatable)
 #     --expect-no-attach    no Navi48Bringup instance may attach
 #     --settle S            seconds between the load and the collection (default 20)
-#     --force-cycle         run even when the preflight finds the kext unloadable (the load then FAILs)
+#     --force-cycle         run even when the preflight finds the kext missing or the chown not allowed
+#                           (kext-loaded then FAILs)
 #     --host H              SSH host (default mac)
 #     --disarm              only disarm NVRAM (recovery), then exit
 #     --console-demo PPM    offline: show the console check on PPM and deliberately altered copies
@@ -38,18 +39,18 @@ COLLECTORS=""
 register_collector() { COLLECTORS="$COLLECTORS $1"; }
 for plugin in "$HERE"/criteria.d/*.sh; do [ -r "$plugin" ] && . "$plugin"; done
 
-HOST=mac CYCLES=3 STAGE="" EXTRA=() KEXT=/Users/pc/navi-stage/kext/Navi48Bringup.kext SETTLE=20
-FORCE=0 MODE=run DEMO=""
+HOST=mac CYCLES=3 STAGE="" EXTRA=() KEXT=$STAGED_KEXT SETTLE=20
+FORCE=0 MODE=run DEMO="" RESTAGE=""
 REMOTE_DIR=navi-stage/acceptance          # relative to the Mac user's home
 RETURN_TIMEOUT=180
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --cycles) CYCLES=$2; shift ;;
         --stage) STAGE=$2; shift ;;
         --arg) EXTRA+=("$2"); shift ;;
-        --kext) KEXT=$2; shift ;;
+        --restage) RESTAGE=$2; shift ;;
         --expect) register_criterion "ioreg $2"; shift ;;
         --expect-log) register_criterion "log $2"; shift ;;
         --expect-no-attach) register_criterion no-attach ;;
@@ -123,11 +124,20 @@ CUR=$(nvram_bootargs) || { echo "could not read NVRAM boot-args" >&2; exit 2; }
 R=$(refusal_message "$CUR"); [ -z "$R" ] || { echo "$R" >&2; exit 2; }
 say "NVRAM boot-args: $CUR"
 
-own=$(rsh "test -d '$KEXT' || echo MISSING; find '$KEXT' \\( ! -user 0 -o ! -group 0 \\) -print 2>/dev/null | head -n 1")
-if [ -n "$own" ]; then
-    case "$own" in MISSING*) msg="kext not found at $KEXT" ;; *) msg="kext is not root:wheel-owned ($own); kmutil will refuse it" ;; esac
+if [ -n "$RESTAGE" ]; then
+    cmd=$(kext_restage_cmd "$RESTAGE" "$KEXT") || { echo "REFUSING --restage $RESTAGE: $(kext_path_problem "$RESTAGE")" >&2; exit 2; }
+    say "restaging $RESTAGE -> $KEXT"
+    rsh "test -d '$RESTAGE'" || { echo "no build at $RESTAGE on $HOST" >&2; exit 2; }
+    rsh "$cmd" || { echo "restage failed (sudo -n refused chown -R 501:20? see harness notes)" >&2; exit 2; }
+fi
+# The load needs `sudo -n chown -R 0:0 <kext>` (/etc/sudoers.d/whateverred-chown); check it is allowed.
+msg=""
+rsh "test -d '$KEXT'" || msg="kext not found at $KEXT"
+[ -n "$msg" ] || rsh "sudo -n -l $(kext_chown_cmd root "$KEXT" | sed 's/^sudo -n //')" >/dev/null 2>&1 \
+    || msg="sudo -n may not run chown -R 0:0 $KEXT (is /etc/sudoers.d/whateverred-chown installed?)"
+if [ -n "$msg" ]; then
     if [ "$FORCE" = 1 ]; then say "WARNING: $msg (--force-cycle: running anyway, kext-loaded will FAIL)"
-    else echo "REFUSING: $msg. Stage it root-owned (see the harness notes) or pass --force-cycle." >&2; exit 2; fi
+    else echo "REFUSING: $msg. See the harness notes, or pass --force-cycle." >&2; exit 2; fi
 fi
 
 rsh "mkdir -p ~/$REMOTE_DIR" && scp -q "$HERE/fbread.c" "$HOST:$REMOTE_DIR/fbread.c" \
@@ -214,6 +224,10 @@ run_cycle() {   # run_cycle <n> <dir>; returns 3 if the bench did not come back
     snapshot_safety "$D/safety-before.txt"
     boottime > "$D/alive.txt"
 
+    # kmutil loads only a root:wheel bundle; hand it to root just before the load.
+    rsh "$(kext_chown_cmd root "$KEXT")" > "$D/kext-chown.txt" 2>&1
+    echo $? > "$D/kext-chown.rc"
+    [ "$(cat "$D/kext-chown.rc")" = 0 ] || say "cycle $n: sudo -n refused chown -R 0:0: $(head -n 1 "$D/kext-chown.txt")"
     say "cycle $n: sudo kmutil load -p $KEXT"
     timeout 300 ssh "${SSHO[@]}" "$HOST" "sudo -n kmutil load -p '$KEXT'" > "$D/kmutil-load.txt" 2>&1
     echo $? > "$D/kmutil-load.rc"
