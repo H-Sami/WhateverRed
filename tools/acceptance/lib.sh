@@ -316,7 +316,7 @@ result_table() {
             if (nd) { print "failures:"; for (d = 1; d <= nd; d++) print det[d] }
             names = ""; for (r = 1; r <= nr; r++) if (order[r] in bad) names = names " " order[r]
             if (ran == want && nr > 0 && names == "") { printf "OVERALL: PASS (%d/%d cycles, %d criteria)\n", ran, want, nr; exit 0 }
-            printf "OVERALL: FAIL (%d/%d cycles ran)%s\n", ran, want, names == "" ? "" : "; failing:" names
+            printf "OVERALL: FAIL (%d/%d cycles ran)%s\n", ran, want, (names == "" ? "" : "; failing:" names)
             exit 1
         }'
 }
