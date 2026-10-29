@@ -30,9 +30,33 @@ The path where Metal runs on Mesa's RADV Vulkan driver, ported to macOS, on top 
 **Substitution route**:
 Upstream's older path that swaps shaders inside Apple's own AMD accelerator kext using Apple-derived shader files. Out of scope.
 
+**Ladder**:
+The bring-up kext's fixed sequence of seventeen stages, from IP discovery to the compute test. It runs at most once per boot; a second run needs a reboot.
+_Avoid_: init sequence, boot sequence
+
 **Compute test**:
 Upstream's first end-to-end GPU check: a shader dispatched through the command processor writes a known value to memory that the CPU reads back.
 
 **GPU-composited desktop**:
 The macOS desktop with WindowServer's Metal compositor running on this driver stack instead of the CPU.
 _Avoid_: acceleration, QE/CI
+
+## Memory
+
+**Visible VRAM**:
+The part of the card's VRAM the CPU reaches directly, through BAR0.
+_Avoid_: aperture, BAR (when the memory is meant, not the PCI resource)
+
+**Device-only VRAM**:
+The rest of the card's VRAM: the GPU uses it normally, the CPU reaches it only through the slow indirect register window.
+_Avoid_: hidden VRAM, invisible VRAM
+
+## macOS
+
+**Development build**:
+The one macOS build the test bench is frozen at, and the build every build pin is derived on.
+_Avoid_: target OS, supported version
+
+**Build pin**:
+A value valid on only one macOS build: a kernel address, a class layout, a private symbol, a shader cache.
+_Avoid_: offset, hard-code (when the build dependence is meant)
