@@ -113,6 +113,7 @@ private:
 	void surveyIPs();
 	void surveyPSP();
 	void surveySMU();
+	bool stageIPDiscovery();   // ticket #16: stage 1, the Navi 44 gc_info geometry gate
 	void stagePSP();       // navi48-psp=1 (== navi48-stage=5)
 	bool buildDeviceContext();   // fills `dev` for the ported amdgpu modules
 	bool mapDoorbells();         // BAR2 -> dev.bar2 (CP/MES/SDMA stages)

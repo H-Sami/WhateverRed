@@ -10,6 +10,7 @@
 #include "regs.hpp"
 #include "amd/amdgpu_discovery.h"
 #include "amd/amdgpu_init.h"
+#include "amd/navi44_identity_pure.h"   // ticket #16: the RX 9060 XT identity (probe, IP versions, gc_info geometry)
 #include "amd/amdgpu_regs.h"
 #include "amd/amdgpu_sdma.h"
 #include "Navi48MetalNub.hpp"   // 0.0.610: terminate a published Metal nub at stop
@@ -518,7 +519,48 @@ void Navi48Bringup::surveyIPs() {
 		snprintf(key, sizeof(key), "IP,%s", w.name);
 		snprintf(ver, sizeof(ver), "%u.%u.%u", ip.major, ip.minor, ip.revision);
 		setProperty(key, ver);
+		// Ticket #16: log (only) where the card differs from the Navi 44 identity the pins assume.
+		if (const n44id::IpVer *want = n44id::expected_ip(w.id))
+			if (!n44id::same_ver(*want, ip.major, ip.minor, ip.revision))
+				N48LOG("ip: %-5s v%u.%u.%u differs from the Navi 44 identity's v%u.%u.%u", w.name, ip.major, ip.minor, ip.revision,
+				       want->major, want->minor, want->rev);
 	}
+}
+
+// Ticket #16: stage 1 (IPDiscovery) on Navi 44. The on-die binary validated (loadOnDieDiscovery) and the IPs
+// were surveyed; here the GC table (gc_info) is parsed and its geometry checked against 2 SE / 2 SA / 8 CU / 8 RB.
+// Publishes the discovered geometry always, and the stage result when navi48-stage asks for a ladder (runStages,
+// reached only for targets above 5, overwrites it). Returns false when the ladder must stop here.
+bool Navi48Bringup::stageIPDiscovery() {
+	const n44id::GcInfo gi = n44id::parse_gc_info(onDieDisc + ipDiscovery.binaryOffset(), n48::kDiscTmrSize - ipDiscovery.binaryOffset());
+	const uint32_t why = gi.reason != n44id::kOk ? gi.reason : n44id::check_geometry(gi.geo);
+	if (gi.reason == n44id::kOk) {
+		char geo[48];
+		snprintf(geo, sizeof(geo), "%u/%u/%u/%u", gi.geo.se, gi.geo.saPerSe, gi.geo.cuPerSa, gi.geo.rb);
+		setProperty("Navi48,GeometrySE", static_cast<uint64_t>(gi.geo.se), 32);
+		setProperty("Navi48,GeometrySAPerSE", static_cast<uint64_t>(gi.geo.saPerSe), 32);
+		setProperty("Navi48,GeometryCUPerSA", static_cast<uint64_t>(gi.geo.cuPerSa), 32);
+		setProperty("Navi48,GeometryRB", static_cast<uint64_t>(gi.geo.rb), 32);
+		setProperty("Navi48,Geometry", geo);
+		N48LOG("discovery: gc_info v%u.%u: %u SE, %u SA per SE, %u CU per SA, %u RB", gi.verMajor, gi.verMinor,
+		       gi.geo.se, gi.geo.saPerSe, gi.geo.cuPerSa, gi.geo.rb);
+	}
+	setProperty("Navi48,GeometryCheck", why == n44id::kOk ? "accepted" : n44id::reason_name(why));
+	if (why != n44id::kOk) N48LOG("discovery: Navi 44 identity check REFUSED: %s — the ladder stops at stage 1", n44id::reason_name(why));
+	if (targetStage) {
+		setProperty("Navi48,StageTarget", static_cast<uint64_t>(targetStage), 32);
+		const amdgpu::BringupStage reached = why == n44id::kOk ? amdgpu::BringupStage::IPDiscovery : amdgpu::BringupStage::None;
+		setProperty("Navi48,StageReached", static_cast<uint64_t>(reached), 32);
+		setProperty("Navi48,StageReachedName", amdgpu::stage_name(reached));
+		setProperty("Navi48,StageResult", static_cast<uint64_t>(why == n44id::kOk ? kIOReturnSuccess : kIOReturnUnsupported), 32);
+		if (why != n44id::kOk) {
+			setProperty("Navi48,StageFailed", amdgpu::stage_name(amdgpu::BringupStage::IPDiscovery));
+			setProperty("Navi48,StageFailedReason", n44id::reason_name(why));
+		}
+		N48LOG("stages: stage 1 %s — reached %u (%s)", why == n44id::kOk ? "passed" : "FAILED",
+		       static_cast<unsigned>(reached), amdgpu::stage_name(reached));
+	}
+	return why == n44id::kOk;
 }
 
 void Navi48Bringup::surveyPSP() {
@@ -7331,11 +7373,10 @@ IOService *Navi48Bringup::probe(IOService *provider, SInt32 *score) {
 	auto *pci = OSDynamicCast(IOPCIDevice, provider);
 	if (!pci) return nullptr;
 	uint32_t vendorDevice = pci->configRead32(kIOPCIConfigVendorID);
-	uint16_t device = static_cast<uint16_t>(vendorDevice >> 16);
-	if ((vendorDevice & 0xffff) != 0x1002 || (device != 0x7550 && device != 0x7551)) {
-		N48LOG("probe: 0x%08x not Navi 48, ignoring", vendorDevice); return nullptr;
+	if (!n44id::accepts_device(vendorDevice)) {
+		N48LOG("probe: 0x%08x not Navi 44, ignoring", vendorDevice); return nullptr;
 	}
-	N48LOG("probe: Navi 48 %s (0x%04x) — bring-up enabled", device == 0x7550 ? "RX 9070/XT" : "R9700", device);
+	N48LOG("probe: Navi 44 RX 9060 XT (0x%04x) — bring-up enabled", static_cast<unsigned>(vendorDevice >> 16));
 	return this;
 }
 
@@ -7363,23 +7404,27 @@ bool Navi48Bringup::start(IOService *provider) {
 	if (!loadOnDieDiscovery()) {
 		N48LOG("start: IP discovery unavailable — MMIO works, but no register map");
 	} else {
-		surveyIPs();
-		surveyPSP();
-		surveySMU();
 		if (!PE_parse_boot_argn("navi48-stage", &targetStage, sizeof(targetStage))) targetStage = 0;
 		if (targetStage) N48LOG("stages: navi48-stage=%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
-		// Arm the host side before the ladder so stage 2 (IHInit) can bring the
-		// ring up with ENABLE_INTR=1. The GPU cannot assert until then.
-		// On by default as of 0.0.35: proven on hardware — the MSI
-		// source arms, the IH ring runs with ENABLE_INTR=1, and the handler
-		// drains and classifies (6 interrupts / 7 entries / 4 EOP / 3 faults on
-		// a stage-17 run) with no storm. navi48-interrupts=0 falls back to the
-		// polled path, which is unchanged.
-		uint32_t wantIrq = 1;
-		PE_parse_boot_argn("navi48-interrupts", &wantIrq, sizeof(wantIrq));
-		if (wantIrq != 0) gBringup.wantInterrupts = armInterrupts();
-		stagePSP();        // no-op unless navi48-psp=1 or navi48-stage>=5
-		publishInterruptCounters();
+		surveyIPs();
+		// Ticket #16: stage 1 (IPDiscovery). The card's own gc_info must give the Navi 44 geometry before
+		// anything past the read-only IP survey runs; on a mismatch the ladder stops here, reason published.
+		if (stageIPDiscovery()) {
+			surveyPSP();
+			surveySMU();
+			// Arm the host side before the ladder so stage 2 (IHInit) can bring the
+			// ring up with ENABLE_INTR=1. The GPU cannot assert until then.
+			// On by default as of 0.0.35: proven on hardware — the MSI
+			// source arms, the IH ring runs with ENABLE_INTR=1, and the handler
+			// drains and classifies (6 interrupts / 7 entries / 4 EOP / 3 faults on
+			// a stage-17 run) with no storm. navi48-interrupts=0 falls back to the
+			// polled path, which is unchanged.
+			uint32_t wantIrq = 1;
+			PE_parse_boot_argn("navi48-interrupts", &wantIrq, sizeof(wantIrq));
+			if (wantIrq != 0) gBringup.wantInterrupts = armInterrupts();
+			stagePSP();        // no-op unless navi48-psp=1 or navi48-stage>=5
+			publishInterruptCounters();
+		}
 	}
 	// build 0.0.515: the read-only raster device the AGDC LINKCFG reply reads through
 	// (n48dcn::liveRaster), built here - after stagePSP built the device context, before the Phase 4 block below can install
