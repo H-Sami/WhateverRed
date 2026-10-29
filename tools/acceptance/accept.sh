@@ -11,6 +11,7 @@
 #     --expect KEY~REGEX      KEY~REGEX matches with grep -E instead
 #     --expect-log REGEX    a kernel log line (Navi48Bringup lines, prefix stripped) must match (repeatable)
 #     --expect-no-attach    no Navi48Bringup instance may attach
+#     --expect-preset NAME  a named set of the above, from lib.sh expect_preset (navi44-stage1)
 #     --settle S            seconds between the load and the collection (default 20)
 #     --force-cycle         run even when the preflight finds the kext missing or the chown not allowed
 #                           (kext-loaded then FAILs)
@@ -54,6 +55,8 @@ while [ $# -gt 0 ]; do
         --expect) register_criterion "ioreg $2"; shift ;;
         --expect-log) register_criterion "log $2"; shift ;;
         --expect-no-attach) register_criterion no-attach ;;
+        --expect-preset) p=$(expect_preset "$2") || { echo "unknown preset: $2" >&2; exit 2; }
+            while IFS= read -r c; do register_criterion "$c"; done <<< "$p"; shift ;;
         --settle) SETTLE=$2; shift ;;
         --force-cycle) FORCE=1 ;;
         --host) HOST=$2; shift ;;

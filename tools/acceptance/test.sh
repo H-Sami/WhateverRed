@@ -121,6 +121,32 @@ printf '%s\n' '22:10:01 probe: 0x75901002 not Navi 48, ignoring' > "$C/log.txt"
 check_match "expect-log passes on a matching line" "^PASS" "$(evaluate_criterion "log probe: 0x[0-9a-f]+ not Navi 48" "$C")"
 check_match "expect-log fails without one" "^FAIL" "$(evaluate_criterion "log stages: ladder" "$C")"
 
+# the navi44-stage1 preset against a capture of what stage 1 publishes on the 9060 XT
+cat > "$C/ioreg.txt" <<'IOREG'
++-o Navi48Bringup  <class Navi48Bringup, id 0x100000abc, registered, matched, active, busy 0 (0 ms), retain 7>
+    {
+      "IOPCIPrimaryMatch" = "0x75901002"
+      "Navi48,StageTarget" = 1
+      "Navi48,StageReached" = 1
+      "Navi48,StageReachedName" = "IPDiscovery"
+      "Navi48,GeometrySE" = 2
+      "Navi48,GeometrySAPerSE" = 2
+      "Navi48,GeometryCUPerSA" = 8
+      "Navi48,GeometryRB" = 8
+      "Navi48,Geometry" = "2/2/8/8"
+      "Navi48,GeometryCheck" = "accepted"
+    }
+IOREG
+printf '%s\n' '22:10:01 probe: Navi 44 RX 9060 XT (0x7590) - bring-up enabled' > "$C/log.txt"
+check "navi44-stage1 preset has 11 criteria" "11" "$(expect_preset navi44-stage1 | wc -l | tr -d ' ')"
+check "an unknown preset is refused" "1" "$(expect_preset nope >/dev/null; echo $?)"
+pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage1)"
+check "navi44-stage1 passes on a good stage-1 capture" "0" "$pf"
+sed 's/"Navi48,GeometryRB" = 8/"Navi48,GeometryRB" = 7/' "$C/ioreg.txt" > "$C/i2" && mv "$C/i2" "$C/ioreg.txt"
+printf '%s\n' '22:10:01 probe: 0x75501002 not Navi 44, ignoring' > "$C/log.txt"
+pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage1)"
+check "navi44-stage1 fails on a wrong RB count and no probe line" "2" "$pf"
+
 printf '%s\n' "-v keepsyms=1 navi48bringup=1 navi48-stage=17" > "$C/armed-bootargs.txt"
 check_match "armed-boot passes when the running boot is armed" "^PASS" "$(evaluate_criterion armed-boot "$C")"
 printf '%s\n' "-v keepsyms=1" > "$C/armed-bootargs.txt"

@@ -292,6 +292,28 @@ crit_log() {   # crit_log REGEX <dir>
     if [ -n "$m" ]; then echo "PASS $m"; else echo "FAIL no log line matches /$1/"; fi
 }
 
+# Named expectation sets (--expect-preset NAME): one criterion per line, as --expect / --expect-log register them.
+#   navi44-stage1  ticket #16: attached to 1002:7590, stage 1 (IPDiscovery) reached, gc_info geometry 2/2/8/8 accepted
+expect_preset() {
+    case "$1" in
+        navi44-stage1) cat <<'PRESET'
+ioreg IOPCIPrimaryMatch=0x75901002
+log probe: Navi 44 RX 9060 XT \(0x7590\)
+ioreg Navi48,StageTarget=1
+ioreg Navi48,StageReached=1
+ioreg Navi48,StageReachedName=IPDiscovery
+ioreg Navi48,GeometrySE=2
+ioreg Navi48,GeometrySAPerSE=2
+ioreg Navi48,GeometryCUPerSA=8
+ioreg Navi48,GeometryRB=8
+ioreg Navi48,Geometry=2/2/8/8
+ioreg Navi48,GeometryCheck=accepted
+PRESET
+        ;;
+        *) return 1 ;;
+    esac
+}
+
 # evaluate_criterion <name> <cycle-dir>
 evaluate_criterion() {
     local fn
