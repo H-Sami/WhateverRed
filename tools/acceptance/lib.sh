@@ -48,8 +48,8 @@ refusal_message() {
 }
 
 # kext_path_problem <path on the Mac>: empty when <path> is an acceptable non-boot staging path (an
-# absolute .kext under /Users/), else why not. Nothing under a home directory loads at boot; the
-# harness additionally checks the boot paths and the AuxKC around every load (never-at-boot).
+# absolute .kext under /Users/), else why not. The approved kext's AuxKC entry points at this path (the
+# AuxKC is what loads at boot); the harness checks the boot paths and the AuxKC md5 every cycle (inert-at-boot).
 kext_path_problem() {
     case "$1" in
         *" "*)        echo "path contains a space" ;;
@@ -95,15 +95,14 @@ disarmed_args() {
     printf '%s\n' "${out# }"
 }
 
-# armed_args <boot-args> [stage] [extra ladder args...]: disarmed args + navi48bringup=1, then
-# navi48-stage=<stage> if given, then the extras. Returns 1 (prints nothing) on a bad stage or a
-# non-ladder extra.
-armed_args() {
-    local cur=$1 stage=${2:-} t out
-    shift; [ $# -gt 0 ] && shift
-    case "$stage" in *[!0-9]*) return 1 ;; esac
-    out="$(disarmed_args "$cur") navi48bringup=1"
-    [ -n "$stage" ] && out="$out navi48-stage=$stage"
+# cycle_args <boot-args> [extra ladder args...]: the boot-args of a cycle's (UNARMED) boot: the disarmed args,
+# then the extras (ladder args start() reads once the token armed it). Returns 1 (prints nothing) on a
+# non-ladder extra, and on navi48bringup / navi48-stage: the kext ignores them now (the token arms and names
+# the stage), and an older build in the AuxKC would arm at boot on them.
+cycle_args() {
+    local cur=$1 t out
+    shift
+    out=$(disarmed_args "$cur")
     for t in "$@"; do
         is_ladder_arg "$t" || return 1
         case "$(arg_name "$t")" in navi48bringup|navi48-stage) return 1 ;; esac
@@ -111,6 +110,38 @@ armed_args() {
     done
     printf '%s\n' "${out# }"
 }
+
+# --- the arming token (ticket #16) --------------------------------------------------------------------
+# The approved kext sits in the AuxKC and IOKit matches it at every boot, so it stays inert unless armed
+# after login: the harness writes navi48-arm=stage:N to NVRAM and makes IOKit re-run matching; probe
+# deletes the token before it does anything else (consume-once) and refuses one seen < 90 s after boot.
+ARM_KEY=navi48-arm
+ARM_MIN_UPTIME=120     # seconds since boot before the harness arms (the kext's own floor is 90 s)
+ARM_DELETE_CMD="sudo -n nvram -d $ARM_KEY"
+# prints the token's `nvram -p` line if there is one, then "nvram-read-ok" if nvram could be read at all
+ARM_READ_CMD="out=\$(nvram -p 2>/dev/null) && { printf '%s\\n' \"\$out\" | grep '^$ARM_KEY[[:space:]]'; echo nvram-read-ok; }"
+# arm_token <stage>: "stage:N" for N 1..17 written without a leading zero (the kext's grammar,
+# src/navi48-bringup/src/amd/arm_token_pure.h); exit 1 and print nothing otherwise.
+arm_token() { case "$1" in [1-9]|1[0-7]) echo "stage:$1" ;; *) return 1 ;; esac; }
+arm_set_cmd() { echo "sudo -n nvram $ARM_KEY=$1"; }
+# token_state <file written from ARM_READ_CMD, or /dev/stdin>: "absent", "present <value>", or "unread".
+# Reads its input once, so a pipe works.
+token_state() {
+    local t; t=$(cat "$1" 2>/dev/null) || { echo unread; return; }
+    printf '%s\n' "$t" | grep -qx 'nvram-read-ok' || { echo unread; return; }
+    printf '%s\n' "$t" | awk -v k="$ARM_KEY" '$1 == k { $1 = ""; sub(/^[ \t]+/, ""); print "present " $0; f = 1; exit } END { if (!f) print "absent" }'
+}
+
+# The re-match (UNVERIFIED on the bench, see the harness notes): IOKit runs probe again only for
+# personalities that are NEW to the IOCatalogue (IOCatalogue::addDrivers skips duplicates), and the
+# boot-time match already failed. So step 1 terminates the services and removes the personalities
+# (the kext stays loaded if it is), step 2 loads the kext by bundle id (from the AuxKC: no bundle path,
+# so no collection rebuild) and, if it is already loaded, re-sends the named personality; either way
+# the personality is new to the catalogue, which starts matching and calls probe.
+BUNDLE_ID=com.navi48.bringup
+PERSONALITY=Navi48Bringup
+REMATCH_UNLOAD_CMD="sudo -n kmutil unload -b $BUNDLE_ID -P"
+REMATCH_LOAD_CMD="sudo -n kmutil load -b $BUNDLE_ID -P $PERSONALITY"
 
 # --- console integrity ------------------------------------------------------------------------------
 # console_compare <before.ppm> <after.ppm>: compares two fbread captures (P3, block-averaged scanout
@@ -198,19 +229,25 @@ ppm_alter() {
 # criteria too: "ioreg KEY=VALUE", "ioreg KEY~REGEX", "log REGEX", "no-attach".
 #
 # Files in a cycle directory (written by accept.sh):
-#   armed-bootargs.txt      kern.bootargs of the armed boot     ssh-return.txt   seconds, or "timeout"
-#   nvram-after-disarm.txt  NVRAM boot-args after the disarm    kmutil-load.{txt,rc}  load output, exit code
-#   kext-chown.{txt,rc}     output and exit code of `sudo -n chown -R 0:0 <kext>` just before the load
+#   boot-bootargs.txt       kern.bootargs of the cycle's boot   ssh-return.txt   seconds, or "timeout"
+#   nvram-after-disarm.txt  NVRAM boot-args after the disarm
+#   token-{before,set,after,final}.txt  ARM_READ_CMD output: before arming, after the write, after the
+#                           re-match + settle, after the harness's own delete (see token_state)
+#   ioreg-before.txt        before arming: `ioreg -l -w0` lines with "Navi48," or "<class Navi48Bringup", then "ioreg-read-ok"
+#   log-before.txt          before arming: this boot's Navi48Bringup kernel log lines (as log.txt)
+#   kext-chown.{txt,rc}     output and exit code of `sudo -n chown -R 0:0 <kext>` just before the re-match
+#   kmutil-unload.{txt,rc}  REMATCH_UNLOAD_CMD output, exit code   kmutil-load.{txt,rc}  REMATCH_LOAD_CMD's
 #   loaded.txt              kmutil showloaded lines for the kext
-#   safety-{before,after}.txt  "aux <AuxKC md5>" + "boot-paths <navi48 kexts/plists found in boot paths>"
-#   alive.txt               kern.boottime seconds before the load, then after (missing line = no answer)
+#   safety-{boot,before,after}.txt  "aux <AuxKC md5>", "boot-paths <navi48 kexts/plists in boot paths>",
+#                           "auxkc <navi48 bundle ids in the AuxKC>" (before the reboot, before arming, at the end)
+#   alive.txt               kern.boottime seconds before the arming, then after (missing line = no answer)
 #   console-{before,after}.ppm  fbread captures      ioreg.txt  `ioreg -rc Navi48Bringup -l -w0`
 #   log.txt                 this boot's kernel log lines containing "Navi48Bringup: " (prefix stripped)
-CRITERIA="armed-boot
-ssh-return
+CRITERIA="ssh-return
 disarmed
-never-at-boot
+inert-at-boot
 kext-loaded
+token-consumed
 ssh-alive
 console"
 
@@ -219,11 +256,6 @@ $1"; }
 
 _first_line() { [ -r "$1" ] && head -n 1 "$1"; }
 
-crit_armed_boot() {
-    local a; a=$(_first_line "$1/armed-bootargs.txt")
-    if is_armed "$a"; then echo "PASS running boot has navi48bringup ($a)"
-    else echo "FAIL running boot is not armed: '${a:-<not read>}'"; fi
-}
 crit_ssh_return() {
     local s; s=$(_first_line "$1/ssh-return.txt")
     case "$s" in ""|*[!0-9]*) echo "FAIL SSH did not return (${s:-not recorded})" ;; *) echo "PASS back over SSH in $s s" ;; esac
@@ -235,14 +267,48 @@ crit_disarmed() {
     for t in $a; do is_bringup_arg "$t" || is_nvidia_arg "$t" && bad="$bad $t"; done
     if [ -n "$bad" ]; then echo "FAIL left in NVRAM:$bad"; else echo "PASS NVRAM boot-args: $a"; fi
 }
-crit_never_at_boot() {
-    local b="$1/safety-before.txt" a="$1/safety-after.txt" ab aa paths
-    [ -r "$b" ] && [ -r "$a" ] || { echo "FAIL safety snapshot missing"; return; }
-    ab=$(awk '$1 == "aux" { print $2 }' "$b"); aa=$(awk '$1 == "aux" { print $2 }' "$a")
-    paths=$(awk '$1 == "boot-paths" { $1 = ""; sub(/^ /, ""); print }' "$a")
+# The kext's log lines inert-at-boot and token-consumed look for (src/navi48-bringup/src/Navi48Bringup.cpp consumeArmToken).
+INERT_LINE='inert (no navi48-arm token in NVRAM'
+CONSUMED_LINE='navi48-arm token consumed (deleted from NVRAM)'
+# inert-at-boot: the boot-time match of the AuxKC kext left it inert, and nothing was installed for boot.
+crit_inert_at_boot() {
+    local d=$1 ba tok m f a0 a1 a2 paths members
+    [ -r "$d/boot-bootargs.txt" ] || { echo "FAIL kern.bootargs of the boot not read"; return; }
+    ba=$(_first_line "$d/boot-bootargs.txt")
+    if is_armed "$ba"; then echo "FAIL the boot carried navi48bringup ($ba): an older AuxKC build arms on it"; return; fi
+    tok=$(token_state "$d/token-before.txt")
+    case "$tok" in
+        unread) echo "FAIL NVRAM not read before arming"; return ;;
+        present*) echo "FAIL a navi48-arm token was in NVRAM before arming: ${tok#present }"; return ;;
+    esac
+    grep -qx 'ioreg-read-ok' "$d/ioreg-before.txt" 2>/dev/null || { echo "FAIL IORegistry not read before arming"; return; }
+    if grep -q '<class Navi48Bringup' "$d/ioreg-before.txt"; then echo "FAIL a Navi48Bringup instance attached before arming"; return; fi
+    m=$(grep -o '"Navi48,Stage[A-Za-z]*"' "$d/ioreg-before.txt" | head -n 1)
+    [ -z "$m" ] || { echo "FAIL $m published before arming"; return; }
+    if grep -qF "$CONSUMED_LINE" "$d/log-before.txt" 2>/dev/null; then echo "FAIL a token was consumed before arming: $(grep -F "$CONSUMED_LINE" "$d/log-before.txt" | head -n 1)"; return; fi
+    if grep -q "bring-up enabled" "$d/log-before.txt" 2>/dev/null; then echo "FAIL probe ran before arming: $(grep "bring-up enabled" "$d/log-before.txt" | head -n 1)"; return; fi
+    grep -qF "$INERT_LINE" "$d/log-before.txt" 2>/dev/null \
+        || { echo "FAIL no inert line before arming (kext not matched at boot, or an AuxKC build without the token gate)"; return; }
+    for f in boot before after; do [ -r "$d/safety-$f.txt" ] || { echo "FAIL safety snapshot safety-$f.txt missing"; return; }; done
+    a0=$(awk '$1 == "aux" { print $2 }' "$d/safety-boot.txt"); a1=$(awk '$1 == "aux" { print $2 }' "$d/safety-before.txt")
+    a2=$(awk '$1 == "aux" { print $2 }' "$d/safety-after.txt")
+    paths=$(cat "$d/safety-boot.txt" "$d/safety-before.txt" "$d/safety-after.txt" | awk '$1 == "boot-paths" { $1 = ""; sub(/^ /, ""); print }' | tr '\n' ' ' | sed 's/ *$//')
+    members=$(awk '$1 == "auxkc" { $1 = ""; sub(/^ /, ""); print }' "$d/safety-after.txt")
     if [ -n "$paths" ]; then echo "FAIL kext/plist in a boot path: $paths"
-    elif [ "$ab" != "$aa" ]; then echo "FAIL AuxKC changed ($ab -> $aa)"
-    else echo "PASS AuxKC unchanged ($aa), nothing in boot paths"; fi
+    elif [ -z "$a0" ] || [ "$a0" != "$a1" ] || [ "$a1" != "$a2" ]; then echo "FAIL AuxKC changed during the cycle (${a0:-?} -> ${a1:-?} -> ${a2:-?})"
+    else echo "PASS no token, inert line logged, no Navi48 instance/properties; AuxKC unchanged ($a2), in it: ${members:-nothing navi48}"; fi
+}
+# token-consumed: after the re-match the token is gone from NVRAM and the kext says it deleted it.
+crit_token_consumed() {
+    local tok line
+    tok=$(token_state "$1/token-after.txt")
+    case "$tok" in
+        unread) echo "FAIL NVRAM not read after the re-match"; return ;;
+        present*) echo "FAIL the token is still in NVRAM after the re-match (${tok#present }): probe did not run"; return ;;
+    esac
+    line=$(grep -F "$CONSUMED_LINE" "$1/log.txt" 2>/dev/null | head -n 1)
+    if [ -n "$line" ]; then echo "PASS gone from NVRAM; $line"
+    else echo "FAIL the token is gone but there is no 'token consumed' line in the kernel log"; fi
 }
 crit_kext_loaded() {
     local rc why
@@ -252,7 +318,9 @@ crit_kext_loaded() {
         return
     fi
     rc=$(_first_line "$1/kmutil-load.rc")
-    if [ "$rc" = 0 ] && [ -s "$1/loaded.txt" ]; then echo "PASS $(_first_line "$1/loaded.txt")"; return; fi
+    if [ "$rc" = 0 ] && [ -s "$1/loaded.txt" ]; then
+        echo "PASS $(_first_line "$1/loaded.txt") (kmutil unload -P rc $(_first_line "$1/kmutil-unload.rc"), load -b rc 0)"; return
+    fi
     # the specific reason (ownership, approval, ...) comes after kmutil's generic "Validating ... failed:"
     why=$(grep -iE 'failed to bind|could not use|invalid|not approved|denied|permission' "$1/kmutil-load.txt" 2>/dev/null | head -n 1)
     [ -n "$why" ] || why=$(grep -iE 'error|fail' "$1/kmutil-load.txt" 2>/dev/null | head -n 1)
