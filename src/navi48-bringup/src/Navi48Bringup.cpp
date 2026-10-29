@@ -11,6 +11,8 @@
 #include "amd/amdgpu_discovery.h"
 #include "amd/amdgpu_init.h"
 #include "amd/navi44_identity_pure.h"   // ticket #16: the RX 9060 XT identity (probe, IP versions, gc_info geometry)
+#include "amd/arm_token_pure.h"        // ticket #16: the consume-once NVRAM arming token (navi48-arm=stage:N)
+#include <IOKit/IODeviceTreeSupport.h> // gIODTPlane (/options = IODTNVRAM)
 #include "amd/amdgpu_regs.h"
 #include "amd/amdgpu_sdma.h"
 #include "Navi48MetalNub.hpp"   // 0.0.610: terminate a published Metal nub at stop
@@ -7366,9 +7368,62 @@ void Navi48Bringup::publishInterruptCounters() {
 // IOService lifecycle
 // ---------------------------------------------------------------------------
 
+static_assert(n48arm::kStageMax == static_cast<uint32_t>(amdgpu::BringupStage::Max), "the arming token's top stage is the ladder's last");
+
+// Ticket #16: the arming gate. The kext sits in the Auxiliary KC and IOKit matches it at every boot, so it is inert unless
+// armed after login by the NVRAM variable navi48-arm (n48arm::kNvramKey). Consume-once: read it, DELETE it, read it again,
+// and arm only if it is gone, so a panic or reset after this point always comes back unarmed. A token that is present
+// is deleted whether it parses or not. Only IORegistryEntry virtuals are called on /options (copyProperty / removeProperty,
+// overridden by IODTNVRAM): no IODTNVRAM-specific vtable slot of the SDK's older header is used. On x86 macOS the
+// AppleEFINVRAM subclass commits a delete through EFI SetVariable straight away (unverified on the bench: the next
+// boot's inert-at-boot check proves it); the second read only proves the in-kernel copy is gone.
+static n48arm::Decision consumeArmToken() {
+	uint8_t buf[n48arm::kCopyLen] = {};
+	size_t len = 0;
+	bool present = false, consumed = false, isNvram = false;
+	IORegistryEntry *opts = IORegistryEntry::fromPath("/options", gIODTPlane);
+	if (opts && opts->metaCast("IODTNVRAM")) {
+		isNvram = true;
+		OSObject *o = opts->copyProperty(n48arm::kNvramKey);
+		if (o) {
+			present = true;
+			if (OSData *d = OSDynamicCast(OSData, o)) {
+				len = d->getLength() < sizeof(buf) ? d->getLength() : sizeof(buf);
+				if (len) memcpy(buf, d->getBytesNoCopy(), len);
+			} else if (OSString *str = OSDynamicCast(OSString, o)) {
+				len = str->getLength() < sizeof(buf) ? str->getLength() : sizeof(buf);
+				if (len) memcpy(buf, str->getCStringNoCopy(), len);
+			}
+			o->release();
+			if (const OSSymbol *key = OSSymbol::withCString(n48arm::kNvramKey)) { opts->removeProperty(key); key->release(); }
+			OSObject *again = opts->copyProperty(n48arm::kNvramKey);
+			consumed = (again == nullptr);
+			if (again) again->release();
+		}
+	}
+	if (opts) opts->release();
+	const n48arm::Decision arm = n48arm::decide(present, buf, len, consumed);
+	if (!isNvram) N48LOG("probe: no IODTNVRAM at /options — cannot read the navi48-arm token");
+	if (!present) {
+		N48LOG("probe: not armed — inert (%s; arm after login with nvram navi48-arm=stage:N)", n48arm::reason_name(arm.reason));
+	} else if (!consumed) {
+		N48LOG("probe: not armed — inert: navi48-arm token present but %s; refusing to arm", n48arm::reason_name(arm.reason));
+	} else if (!arm.armed) {
+		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM), %u byte(s), refused: %s; not armed — inert",
+		       static_cast<unsigned>(len), n48arm::reason_name(arm.reason));
+	} else {
+		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target %u", arm.stage);
+	}
+	uint32_t old = 0;
+	if (PE_parse_boot_argn("navi48bringup", &old, sizeof(old)) || PE_parse_boot_argn("navi48-stage", &old, sizeof(old)))
+		N48LOG("probe: the navi48bringup / navi48-stage boot-args are ignored (the navi48-arm token arms and names the stage)");
+	return arm;
+}
+
 IOService *Navi48Bringup::probe(IOService *provider, SInt32 *score) {
-	uint32_t on = 0;
-	if (!PE_parse_boot_argn("navi48bringup", &on, sizeof(on)) || on == 0) return nullptr;
+	const n48arm::Decision arm = consumeArmToken();   // FIRST: nothing else runs on an unarmed match
+	if (!arm.armed) return nullptr;
+	targetStage = arm.stage;
 	if (!super::probe(provider, score)) return nullptr;
 	auto *pci = OSDynamicCast(IOPCIDevice, provider);
 	if (!pci) return nullptr;
@@ -7404,8 +7459,8 @@ bool Navi48Bringup::start(IOService *provider) {
 	if (!loadOnDieDiscovery()) {
 		N48LOG("start: IP discovery unavailable — MMIO works, but no register map");
 	} else {
-		if (!PE_parse_boot_argn("navi48-stage", &targetStage, sizeof(targetStage))) targetStage = 0;
-		if (targetStage) N48LOG("stages: navi48-stage=%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
+		// Ticket #16: the stage target came from the navi48-arm token in probe (targetStage), not a boot-arg.
+		if (targetStage) N48LOG("stages: navi48-arm stage:%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
 		surveyIPs();
 		// Ticket #16: stage 1 (IPDiscovery). The card's own gc_info must give the Navi 44 geometry before
 		// anything past the read-only IP survey runs; on a mismatch the ladder stops here, reason published.

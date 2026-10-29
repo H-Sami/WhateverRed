@@ -275,9 +275,9 @@ static void i5_pins(const std::string &root) {
     // Stage 1: start() gates everything after the IP survey on the identity check.
     const std::string st = between(b, "bool Navi48Bringup::start(IOService *provider) {", "\nvoid Navi48Bringup::stop(");
     const size_t gate = st.find("if (stageIPDiscovery()) {"), sip = st.find("surveyIPs();"), arm = st.find("armInterrupts();"),
-                 psp = st.find("stagePSP();"), spsp = st.find("surveyPSP();"), stg = st.find("PE_parse_boot_argn(\"navi48-stage\", &targetStage");
+                 psp = st.find("stagePSP();"), spsp = st.find("surveyPSP();"), stg = st.find("N48LOG(\"stages: navi48-arm stage:%u");
     expect(gate != std::string::npos && sip != std::string::npos && sip < gate, "I5: start() runs the stage-1 gate after the IP survey");
-    expect(stg != std::string::npos && stg < gate, "I5: navi48-stage is parsed before the stage-1 gate (it publishes the target)");
+    expect(stg != std::string::npos && stg < gate, "I5: the token's stage target (set in probe, ticket #16) is logged before the stage-1 gate (it publishes the target)");
     expect(gate != std::string::npos && arm != std::string::npos && psp != std::string::npos && spsp != std::string::npos && gate < spsp && gate < arm && gate < psp,
            "I5: surveyPSP, armInterrupts and stagePSP run only after the stage-1 gate");
     expect_u("I5: start() has one stage-1 gate", count_of(st, "stageIPDiscovery()"), 1);

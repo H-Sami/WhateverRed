@@ -125,13 +125,11 @@ plant 40 $B "stage 1 does not publish the RB count" '		setProperty("Navi48,Geome
 plant 41 $B "surveyIPs compares nothing" 'n44id::expected_ip(w.id)' 'static_cast<const n44id::IpVer *>(nullptr)'
 plant 42 $B "stage 1 names its stage by hand" 'setProperty("Navi48,StageFailed", amdgpu::stage_name(amdgpu::BringupStage::IPDiscovery));' 'setProperty("Navi48,StageFailed", "IPDiscovery");'
 plant 43 $B "Navi48Bringup.cpp does not include the module" '#include "amd/navi44_identity_pure.h"' '#include "amd/amdgpu_ip.h"'
-plant 44 $B "navi48-stage is parsed after the gate" '		if (!PE_parse_boot_argn("navi48-stage", &targetStage, sizeof(targetStage))) targetStage = 0;
-		if (targetStage) N48LOG("stages: navi48-stage=%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
+plant 44 $B "the stage target is logged after the gate" '		if (targetStage) N48LOG("stages: navi48-arm stage:%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
 		surveyIPs();
 ' '		surveyIPs();
 		if (stageIPDiscovery()) {}
-		if (!PE_parse_boot_argn("navi48-stage", &targetStage, sizeof(targetStage))) targetStage = 0;
-		if (targetStage) N48LOG("stages: navi48-stage=%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
+		if (targetStage) N48LOG("stages: navi48-arm stage:%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
 '
 plant 45 $H "the header does not declare the stage-1 gate" 'bool stageIPDiscovery();' 'void stageIPDiscoveryUnused();'
 plant 46 $PL "the bring-up personality is back on Navi 48" '<string>0x75901002</string>' '<string>0x75501002 0x75511002</string>'
