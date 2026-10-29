@@ -1,3 +1,9 @@
+> **WhateverRed** is a port of [Cobalt64](https://github.com/Almosst-DEV/Cobalt64) to the
+> **Radeon RX 9060 XT (Navi 44, 1002:7590)**. All credit for the driver stack itself goes to
+> the Cobalt64 author and contributors; this repository keeps their full history and MIT
+> licence. Work-in-progress planning lives in this repo's issues (label `wayfinder:map`).
+> Not affiliated with or endorsed by the Cobalt64 project. The text below is upstream's README.
+
 <p align="center">
   <a href="https://cobalt64.com"><img src="docs/assets/logo.svg" alt="Cobalt64 logo" width="128" height="128"></a>
 </p>
