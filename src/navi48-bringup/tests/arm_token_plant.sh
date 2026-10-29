@@ -100,9 +100,13 @@ plant 17 $B "the stage comes from navi48-stage again" '		// Ticket #16: the stag
 plant 18 $B "the stage target is not taken from the token" '	targetStage = arm.stage;
 ' ''
 plant 19 $B "the inert line is not logged" 'N48LOG("probe: not armed — inert (%s;' 'IOLog("(%s;'
-plant 20 $B "decide is told the token was consumed when it was not" 'n48arm::decide(present, buf, len, consumed)' 'n48arm::decide(present, buf, len, present)'
+plant 20 $B "decide is told the token was consumed when it was not" 'n48arm::decide(present, buf, len, consumed, uptimeS)' 'n48arm::decide(present, buf, len, present, uptimeS)'
 plant 21 $B "/options is not checked to be the NVRAM" 'if (opts && opts->metaCast("IODTNVRAM")) {' 'if (opts) {'
 plant 22 $B "the kext does not tie kStageMax to the ladder" 'static_assert(n48arm::kStageMax == static_cast<uint32_t>(amdgpu::BringupStage::Max), "the arming token'"'"'s top stage is the ladder'"'"'s last");' ''
+plant 24 $P "no uptime floor" '    if (uptime_s < kMinUptimeS) return { false, 0, kTooEarly };
+' ''
+plant 25 $P "the floor is 30 s" 'kMinUptimeS = 90;' 'kMinUptimeS = 30;'
+plant 26 $B "the uptime is not passed" 'n48arm::decide(present, buf, len, consumed, uptimeS)' 'n48arm::decide(present, buf, len, consumed, 1000)'
 plant 23 $SU "the suite does not run the test" '$T/arm_token_test.cpp' '$T/arm_token_test.cc'
 echo "plants: $total run, $escaped escaped/failed"
 [ "$escaped" -eq 0 ]

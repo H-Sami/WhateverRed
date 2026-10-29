@@ -7402,15 +7402,18 @@ static n48arm::Decision consumeArmToken() {
 		}
 	}
 	if (opts) opts->release();
-	const n48arm::Decision arm = n48arm::decide(present, buf, len, consumed);
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+	const uint64_t uptimeS = ns / 1000000000ULL;
+	const n48arm::Decision arm = n48arm::decide(present, buf, len, consumed, uptimeS);
 	if (!isNvram) N48LOG("probe: no IODTNVRAM at /options — cannot read the navi48-arm token");
 	if (!present) {
 		N48LOG("probe: not armed — inert (%s; arm after login with nvram navi48-arm=stage:N)", n48arm::reason_name(arm.reason));
 	} else if (!consumed) {
 		N48LOG("probe: not armed — inert: navi48-arm token present but %s; refusing to arm", n48arm::reason_name(arm.reason));
 	} else if (!arm.armed) {
-		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM), %u byte(s), refused: %s; not armed — inert",
-		       static_cast<unsigned>(len), n48arm::reason_name(arm.reason));
+		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM), %u byte(s), uptime %llu s, refused: %s; not armed — inert",
+		       static_cast<unsigned>(len), static_cast<unsigned long long>(uptimeS), n48arm::reason_name(arm.reason));
 	} else {
 		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target %u", arm.stage);
 	}

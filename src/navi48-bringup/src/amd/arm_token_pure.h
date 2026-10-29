@@ -7,6 +7,9 @@
 // arms only if it is gone afterwards (consume-once), so a panic or reset always comes back unarmed.
 // The navi48bringup / navi48-stage boot-args no longer arm: a boot-arg survives a reboot, which is exactly
 // what must not arm a kext that is matched at boot.
+// Uptime floor: a token seen less than kMinUptimeS after boot is consumed but REFUSED. The boot-time match of the
+// AuxKC kext happens well inside it, so a token left behind (the bench reset while armed, or a token set by hand
+// whose re-match never ran) is deleted at the next boot without arming it. The harness arms after 120 s of uptime.
 //
 // Grammar: exactly "stage:N", N = 1..17 in decimal with no leading zero (amdgpu::BringupStage, 17 =
 // ComputeDispatch), optionally followed by ONE NUL. Anything else is refused (fail closed).
@@ -22,6 +25,7 @@ static constexpr uint32_t kStageMin = 1;
 static constexpr uint32_t kStageMax = 17;          // amdgpu::BringupStage::Max (static_assert in Navi48Bringup.cpp)
 static constexpr size_t   kMaxTokenLen = 9;        // "stage:17" + one NUL; probe copies at most kCopyLen bytes
 static constexpr size_t   kCopyLen = 32;           // > kMaxTokenLen, so a longer variable still reads as too long
+static constexpr uint64_t kMinUptimeS = 90;        // seconds since boot before a token may arm
 
 enum Reason : uint32_t {
     kArmed = 0,
@@ -29,6 +33,7 @@ enum Reason : uint32_t {
     kNotConsumed,      // the variable was there but is still there after the delete: never arm
     kMalformed,        // not "stage:N"
     kStageOutOfRange,  // "stage:N" with N outside 1..17
+    kTooEarly,         // seen less than kMinUptimeS after boot: a token left over from before a reset
 };
 static inline const char *reason_name(uint32_t r) {
     switch (r) {
@@ -37,6 +42,7 @@ static inline const char *reason_name(uint32_t r) {
     case kNotConsumed:     return "the token could not be deleted from NVRAM";
     case kMalformed:       return "malformed token (want stage:N)";
     case kStageOutOfRange: return "stage out of range (want 1..17)";
+    case kTooEarly:        return "token seen within 90 s of boot (left over from before a reset)";
     default:               return "unknown";
     }
 }
@@ -44,11 +50,12 @@ static inline const char *reason_name(uint32_t r) {
 struct Decision { bool armed; uint32_t stage; uint32_t reason; };
 
 // present:  the variable existed when probe read it;  value/len: its bytes (as copied, at most kCopyLen);
-// consumed: after probe deleted it, a second read found nothing.
-static inline Decision decide(bool present, const uint8_t *value, size_t len, bool consumed) {
+// consumed: after probe deleted it, a second read found nothing;  uptime_s: whole seconds since boot.
+static inline Decision decide(bool present, const uint8_t *value, size_t len, bool consumed, uint64_t uptime_s) {
     const Decision no = { false, 0, kMalformed };
     if (!present) return { false, 0, kAbsent };
     if (!consumed) return { false, 0, kNotConsumed };
+    if (uptime_s < kMinUptimeS) return { false, 0, kTooEarly };
     if (!value || len == 0 || len > kMaxTokenLen) return no;
     if (value[len - 1] == 0) len--;                 // one trailing NUL
     static const char kPrefix[] = "stage:";
