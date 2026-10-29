@@ -196,9 +196,21 @@ run_cycle() {   # run_cycle <n> <dir>; returns 3 if the bench did not come back
     disarm_nvram > "$D/nvram-after-disarm.txt" && ARMED=0
     say "cycle $n: NVRAM disarmed: $(cat "$D/nvram-after-disarm.txt")"
 
-    # let the login window / desktop settle before the baseline capture
+    # The desktop keeps changing for a while after login (Dock, login items, notifications), and the
+    # console check compares against the baseline, so wait until two captures 15 s apart agree.
     while [ "$(rsh 'echo $(( $(date +%s) - $(sysctl -n kern.boottime | sed -E "s/.*sec = ([0-9]+).*/\1/") ))')" -lt 60 ] 2>/dev/null; do sleep 5; done
     capture_console "$D/console-before.ppm"
+    local tries=0 v
+    while [ "$tries" -lt 12 ]; do
+        sleep 15; tries=$((tries + 1))
+        mv "$D/console-before.ppm" "$D/console-prev.ppm"
+        capture_console "$D/console-before.ppm"
+        v=$(console_compare "$D/console-prev.ppm" "$D/console-before.ppm")
+        echo "settle $tries: $v" >> "$D/console-settle.txt"
+        case "$v" in PASS*) break ;; esac
+    done
+    rm -f "$D/console-prev.ppm"
+    say "cycle $n: console baseline after $tries settle capture(s): $(tail -n 1 "$D/console-settle.txt")"
     snapshot_safety "$D/safety-before.txt"
     boottime > "$D/alive.txt"
 
