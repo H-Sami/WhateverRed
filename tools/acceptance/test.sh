@@ -153,6 +153,10 @@ echo 0 > "$C/kmutil-load.rc"; echo "com.navi48.bringup (0.0.664)" > "$C/loaded.t
 check_match "kext-loaded passes" "^PASS" "$(evaluate_criterion kext-loaded "$C")"
 echo 30 > "$C/kmutil-load.rc"; : > "$C/loaded.txt"; printf 'Validating extension failed: Kext x at /p:\n\nFilesystem error: Invalid ownership (501:20)\n' > "$C/kmutil-load.txt"
 check_match "kext-loaded fails with kmutil's reason" "^FAIL .*rc 30.*Invalid ownership" "$(evaluate_criterion kext-loaded "$C")"
+echo 31 > "$C/kmutil-load.rc"
+printf "Error occurred while building a collection: \n    1: One or more binaries has an error which prevented linking.  See other errors.\n    2: Could not use 'x' because: Failed to bind '_strnstr' in 'x'\n" > "$C/kmutil-load.txt"
+check_match "kext-loaded names the link error, not the generic header" "^FAIL .*rc 31: .*Failed to bind '_strnstr'" "$(evaluate_criterion kext-loaded "$C")"
+echo 30 > "$C/kmutil-load.rc"; printf 'Validating extension failed: Kext x at /p:\n\nFilesystem error: Invalid ownership (501:20)\n' > "$C/kmutil-load.txt"
 printf 'sudo: a password is required\n' > "$C/kext-chown.txt"; echo 1 > "$C/kext-chown.rc"
 check_match "kext-loaded names a refused chown before kmutil's reason" \
     "^FAIL sudo -n refused chown -R 0:0 .*whateverred-chown.*password is required" "$(evaluate_criterion kext-loaded "$C")"

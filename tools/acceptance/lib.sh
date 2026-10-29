@@ -254,8 +254,9 @@ crit_kext_loaded() {
     rc=$(_first_line "$1/kmutil-load.rc")
     if [ "$rc" = 0 ] && [ -s "$1/loaded.txt" ]; then echo "PASS $(_first_line "$1/loaded.txt")"; return; fi
     # the specific reason (ownership, approval, ...) comes after kmutil's generic "Validating ... failed:"
-    why=$(grep -iE 'invalid|not approved|denied|permission|error' "$1/kmutil-load.txt" 2>/dev/null | head -n 1)
-    [ -n "$why" ] || why=$(grep -iE 'fail' "$1/kmutil-load.txt" 2>/dev/null | head -n 1)
+    why=$(grep -iE 'failed to bind|could not use|invalid|not approved|denied|permission' "$1/kmutil-load.txt" 2>/dev/null | head -n 1)
+    [ -n "$why" ] || why=$(grep -iE 'error|fail' "$1/kmutil-load.txt" 2>/dev/null | head -n 1)
+    why=$(printf '%s' "$why" | sed 's/^[[:space:]]*[0-9]*:[[:space:]]*//')
     echo "FAIL kmutil load rc ${rc:-?}${why:+: $why}"
 }
 crit_ssh_alive() {
