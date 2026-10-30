@@ -242,7 +242,8 @@ ppm_alter() {
 #                           "auxkc <navi48 bundle ids in the AuxKC>" (before the reboot, before arming, at the end)
 #   alive.txt               kern.boottime seconds before the arming, then after (missing line = no answer)
 #   console-{before,after}.ppm  fbread captures      ioreg.txt  `ioreg -rc Navi48Bringup -l -w0`
-#   log.txt                 this boot's kernel log lines containing "Navi48Bringup: " (prefix stripped)
+#   log.txt                 this boot's (by boot UUID) kernel log lines containing "Navi48Bringup: " (prefix
+#                           stripped), then "log-read-ok <boot UUID>"; empty if the log was not read
 CRITERIA="ssh-return
 disarmed
 inert-at-boot
@@ -270,9 +271,35 @@ crit_disarmed() {
 # The kext's log lines inert-at-boot and token-consumed look for (src/navi48-bringup/src/Navi48Bringup.cpp consumeArmToken).
 INERT_LINE='inert (no navi48-arm token in NVRAM'
 CONSUMED_LINE='navi48-arm token consumed (deleted from NVRAM)'
-# inert-at-boot: the boot-time match of the AuxKC kext left it inert, and nothing was installed for boot.
+# The last line kernel_log writes once it has read this boot's log (boot_log_lines), followed by the boot UUID.
+LOG_READ_OK='log-read-ok'
+# boot_log_lines < (boot UUID line, then `log show --style ndjson` lines): the "Navi48Bringup: " messages of
+# that boot only, prefix stripped and JSON-unescaped, then "log-read-ok <uuid>". Prints nothing and returns 1
+# without a UUID, so a failed read can't look like a clean boot. Selecting by bootUUID, not by timestamp, is
+# what keeps a previous boot's line out (see kernel_log in accept.sh).
+boot_log_lines() {
+    local uuid
+    IFS= read -r uuid || uuid=""
+    uuid=$(printf '%s' "$uuid" | tr -d ' \r')
+    [ -n "$uuid" ] || return 1
+    awk -v u="$uuid" -v ok="$LOG_READ_OK" '
+        index($0, "\"bootUUID\":\"" u "\"") {
+            i = index($0, "\"eventMessage\":\""); if (!i) next
+            s = substr($0, i + 16)
+            gsub(/\\\\/, "\001", s); gsub(/\\"/, "\002", s)
+            s = substr(s, 1, index(s, "\"") - 1)
+            gsub(/\\\//, "/", s); gsub(/\\n/, " ", s); gsub(/\\t/, " ", s)
+            gsub(/\002/, "\"", s); gsub(/\001/, "\\", s)
+            p = index(s, "Navi48Bringup: "); if (p) print substr(s, p + 15)
+        }
+        END { print ok " " u }'
+}
+# inert-at-boot: before the token is set the kext has not armed or run anything this boot, and nothing was
+# installed for boot. On macOS 26.7.2 the AuxKC kext is never matched at boot (kernelmanagerd marks it loadable
+# only on an explicit kmutil request), so no inert line is required: no instance, no Navi48,* property, no
+# consumed / "bring-up enabled" line this boot and no token is the PASS. An inert line, if logged, is evidence.
 crit_inert_at_boot() {
-    local d=$1 ba tok m f a0 a1 a2 paths members
+    local d=$1 ba tok m f a0 a1 a2 paths members seen
     [ -r "$d/boot-bootargs.txt" ] || { echo "FAIL kern.bootargs of the boot not read"; return; }
     ba=$(_first_line "$d/boot-bootargs.txt")
     if is_armed "$ba"; then echo "FAIL the boot carried navi48bringup ($ba): an older AuxKC build arms on it"; return; fi
@@ -283,12 +310,12 @@ crit_inert_at_boot() {
     esac
     grep -qx 'ioreg-read-ok' "$d/ioreg-before.txt" 2>/dev/null || { echo "FAIL IORegistry not read before arming"; return; }
     if grep -q '<class Navi48Bringup' "$d/ioreg-before.txt"; then echo "FAIL a Navi48Bringup instance attached before arming"; return; fi
-    m=$(grep -o '"Navi48,Stage[A-Za-z]*"' "$d/ioreg-before.txt" | head -n 1)
+    m=$(grep -o '"Navi48,[^"]*"' "$d/ioreg-before.txt" | head -n 1)
     [ -z "$m" ] || { echo "FAIL $m published before arming"; return; }
+    grep -q "^$LOG_READ_OK " "$d/log-before.txt" 2>/dev/null || { echo "FAIL this boot's kernel log not read before arming"; return; }
     if grep -qF "$CONSUMED_LINE" "$d/log-before.txt" 2>/dev/null; then echo "FAIL a token was consumed before arming: $(grep -F "$CONSUMED_LINE" "$d/log-before.txt" | head -n 1)"; return; fi
     if grep -q "bring-up enabled" "$d/log-before.txt" 2>/dev/null; then echo "FAIL probe ran before arming: $(grep "bring-up enabled" "$d/log-before.txt" | head -n 1)"; return; fi
-    grep -qF "$INERT_LINE" "$d/log-before.txt" 2>/dev/null \
-        || { echo "FAIL no inert line before arming (kext not matched at boot, or an AuxKC build without the token gate)"; return; }
+    if grep -qF "$INERT_LINE" "$d/log-before.txt"; then seen="inert line logged"; else seen="kext not matched at boot (no inert line)"; fi
     for f in boot before after; do [ -r "$d/safety-$f.txt" ] || { echo "FAIL safety snapshot safety-$f.txt missing"; return; }; done
     a0=$(awk '$1 == "aux" { print $2 }' "$d/safety-boot.txt"); a1=$(awk '$1 == "aux" { print $2 }' "$d/safety-before.txt")
     a2=$(awk '$1 == "aux" { print $2 }' "$d/safety-after.txt")
@@ -296,7 +323,7 @@ crit_inert_at_boot() {
     members=$(awk '$1 == "auxkc" { $1 = ""; sub(/^ /, ""); print }' "$d/safety-after.txt")
     if [ -n "$paths" ]; then echo "FAIL kext/plist in a boot path: $paths"
     elif [ -z "$a0" ] || [ "$a0" != "$a1" ] || [ "$a1" != "$a2" ]; then echo "FAIL AuxKC changed during the cycle (${a0:-?} -> ${a1:-?} -> ${a2:-?})"
-    else echo "PASS no token, inert line logged, no Navi48 instance/properties; AuxKC unchanged ($a2), in it: ${members:-nothing navi48}"; fi
+    else echo "PASS no token, $seen, no Navi48 instance/properties; AuxKC unchanged ($a2), in it: ${members:-nothing navi48}"; fi
 }
 # token-consumed: after the re-match the token is gone from NVRAM and the kext says it deleted it.
 crit_token_consumed() {
@@ -356,7 +383,7 @@ crit_ioreg() {   # crit_ioreg "KEY=VALUE" | "KEY~REGEX" <dir>
     else echo "FAIL $key = $v, expected $op $want"; fi
 }
 crit_log() {   # crit_log REGEX <dir>
-    local m; m=$(grep -E -- "$1" "$2/log.txt" 2>/dev/null | head -n 1)
+    local m; m=$(grep -v "^$LOG_READ_OK " "$2/log.txt" 2>/dev/null | grep -E -- "$1" | head -n 1)
     if [ -n "$m" ]; then echo "PASS $m"; else echo "FAIL no log line matches /$1/"; fi
 }
 

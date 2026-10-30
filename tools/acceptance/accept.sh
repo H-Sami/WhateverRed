@@ -22,8 +22,8 @@
 #     --disarm              only disarm NVRAM (recovery: boot-args and the navi48-arm token), then exit
 #     --console-demo PPM    offline: show the console check on PPM and deliberately altered copies
 #
-# One cycle (ticket #16: the approved kext is in the AuxKC and matched at EVERY boot; it stays inert
-# unless armed after login by the consume-once NVRAM token navi48-arm=stage:N):
+# One cycle (ticket #16: the approved kext is in the AuxKC; on 26.7.2 nothing matches it at boot, and any
+# match stays inert unless armed after login by the consume-once NVRAM token navi48-arm=stage:N):
 #   refuse post-ladder boot-args -> boot-args = disarmed + --arg extras (never navi48bringup) ->
 #   `sudo shutdown -r now` UNARMED -> wait for SSH on a NEW boot (3 min, else stop) -> disarm NVRAM ->
 #   wait until 120 s of uptime (the kext refuses a token seen < 90 s after boot) -> console baseline ->
@@ -202,10 +202,18 @@ snapshot_safety() {   # snapshot_safety <file>
          a=$(kmutil inspect -A /Library/KernelCollections/AuxiliaryKernelExtensions.kc 2>/dev/null | grep -i navi48 | awk "{print \$1 \"@\" \$2}" | tr "\n" " ")
          echo "boot-paths $p"; echo "auxkc $a"' > "$1" 2>/dev/null
 }
-kernel_log() {   # kernel_log <file>: this boot's "Navi48Bringup: " kernel log lines, prefix stripped
-    rsh 'sudo -n log show --start "$(date -r $(sysctl -n kern.boottime | sed -E "s/.*[{] sec = ([0-9]+).*/\1/") "+%Y-%m-%d %H:%M:%S")" \
-            --predicate "eventMessage CONTAINS \"Navi48Bringup\"" --style compact 2>/dev/null' \
-        | sed -n 's/.*Navi48Bringup: //p' > "$1"
+# kernel_log <file>: this boot's "Navi48Bringup: " kernel log lines, prefix stripped, then "log-read-ok <uuid>"
+# (boot_log_lines). The boot is selected by its UUID: every ndjson event carries "bootUUID", which equals
+# kern.bootsessionuuid (checked on the bench, 26.7.2). A time window can't do it: the 2026-10-30 run's
+# `--start <kern.boottime>` let a previous-boot line in, because early-boot timestamps and kern.boottime
+# move with clock corrections; `--last boot` is the same kind of time cut. So the window here is
+# deliberately wide (boottime - 1 h) and only narrows the read; the UUID decides. No marker (an empty file)
+# when the UUID or the log could not be read, and inert-at-boot FAILs on that.
+kernel_log() {
+    rsh 'u=$(sysctl -n kern.bootsessionuuid) && b=$(sysctl -n kern.boottime | sed -E "s/.*[{] sec = ([0-9]+).*/\1/") \
+         && out=$(sudo -n log show --start "$(date -r $((b - 3600)) "+%Y-%m-%d %H:%M:%S")" \
+                    --predicate "process == \"kernel\" AND eventMessage CONTAINS \"Navi48Bringup: \"" --style ndjson 2>/dev/null) \
+         && { echo "$u"; printf "%s\n" "$out"; }' 2>/dev/null | boot_log_lines > "$1"
 }
 uptime_s() { rsh 'echo $(( $(date +%s) - $(sysctl -n kern.boottime | sed -E "s/.*[{] sec = ([0-9]+).*/\1/") ))' 2>/dev/null; }
 capture_console() {   # capture_console <file.ppm>
@@ -264,7 +272,8 @@ run_cycle() {   # run_cycle <n> <dir>; returns 3 if the bench did not come back
     say "cycle $n: console baseline after $tries settle capture(s): $(tail -n 1 "$D/console-settle.txt")"
     snapshot_safety "$D/safety-before.txt"
 
-    # The inert state the boot-time (AuxKC) match left: no token, no instance, no Navi48 properties, the inert line.
+    # The state before arming: no token, no instance, no Navi48 properties, no consumed/enabled line (an inert
+    # line only if something matched the AuxKC kext at boot).
     token_read > "$D/token-before.txt"
     rsh 'out=$(ioreg -l -w0 2>/dev/null) && { printf "%s\n" "$out" | grep -E "\"Navi48,|<class Navi48Bringup"; echo ioreg-read-ok; }' > "$D/ioreg-before.txt" 2>/dev/null
     kernel_log "$D/log-before.txt"

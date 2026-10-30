@@ -148,6 +148,9 @@ check_match "no-attach passes with no instance" "^PASS" "$(evaluate_criterion no
 printf '%s\n' '22:10:01 probe: 0x75901002 not Navi 48, ignoring' > "$C/log.txt"
 check_match "expect-log passes on a matching line" "^PASS" "$(evaluate_criterion "log probe: 0x[0-9a-f]+ not Navi 48" "$C")"
 check_match "expect-log fails without one" "^FAIL" "$(evaluate_criterion "log stages: ladder" "$C")"
+cp "$C/log.txt" "$TMP/log.keep"; printf 'log-read-ok 29551BDC-AA5E-48C4-AF8F-39D94BC4041C\n' >> "$C/log.txt"
+check_match "expect-log never matches kernel_log's read marker" "^FAIL" "$(evaluate_criterion "log read-ok" "$C")"
+cp "$TMP/log.keep" "$C/log.txt"
 
 # the navi44-stage1 preset against a capture of what stage 1 publishes on the 9060 XT
 cat > "$C/ioreg.txt" <<'IOREG'
@@ -183,12 +186,13 @@ printf '%s\n' "$CLEAN navi48bringup=1" > "$C/nvram-after-disarm.txt"
 check_match "disarmed names a leftover arming arg" "^FAIL .*navi48bringup" "$(evaluate_criterion disarmed "$C")"
 
 # inert-at-boot: before arming, the boot-time match left the kext inert and nothing was installed for boot.
+LOG_OK='log-read-ok 29551BDC-AA5E-48C4-AF8F-39D94BC4041C'
 INERT='22:09:12 probe: not armed — inert (no navi48-arm token in NVRAM; arm after login with nvram navi48-arm=stage:N)'
 inert_fixture() {
     printf '%s\n' "-v keepsyms=1" > "$C/boot-bootargs.txt"
     printf 'nvram-read-ok\n' > "$C/token-before.txt"
     printf '+-o Root  <class IORegistryEntry, id 0x100000100, retain 20>\nioreg-read-ok\n' > "$C/ioreg-before.txt"
-    printf '%s\n' "$INERT" > "$C/log-before.txt"
+    printf '%s\n%s\n' "$INERT" "$LOG_OK" > "$C/log-before.txt"
     printf 'aux 8d5f\nboot-paths\nauxkc com.navi48.bringup\n' > "$C/safety-boot.txt"
     cp "$C/safety-boot.txt" "$C/safety-before.txt"; cp "$C/safety-boot.txt" "$C/safety-after.txt"
 }
@@ -202,11 +206,22 @@ inert_fixture; printf '%s\n' "-v navi48bringup=1" > "$C/boot-bootargs.txt"
 check_match "inert-at-boot fails on a boot carrying navi48bringup (an old AuxKC build arms on it)" "^FAIL .*navi48bringup" "$(evaluate_criterion inert-at-boot "$C")"
 inert_fixture; rm "$C/boot-bootargs.txt"
 check_match "inert-at-boot fails when the boot's args were not read" "^FAIL .*kern.bootargs" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n' "$LOG_OK" > "$C/log-before.txt"
+check_match "inert-at-boot passes when the AuxKC kext was not matched at boot (no inert line on macOS 26.7.2)" \
+    "^PASS .*not matched at boot" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture
+check_match "inert-at-boot records the inert line as evidence when there is one" "^PASS .*inert line logged" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n' "$INERT" > "$C/log-before.txt"
+check_match "inert-at-boot fails when this boot's kernel log was not read" "^FAIL .*kernel log not read" "$(evaluate_criterion inert-at-boot "$C")"
 inert_fixture; : > "$C/log-before.txt"
-check_match "inert-at-boot fails without the inert line (kext not matched at boot, or an old build)" "^FAIL .*inert line" "$(evaluate_criterion inert-at-boot "$C")"
-inert_fixture; printf '%s\n%s\n' "$INERT" '22:09:12 probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1' > "$C/log-before.txt"
+check_match "inert-at-boot fails on an empty log-before (the read never finished)" "^FAIL .*kernel log not read" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '      "Navi48,ProvisionedThisBoot" = Yes\nioreg-read-ok\n' > "$C/ioreg-before.txt"
+check_match "inert-at-boot fails on any Navi48,* property before arming" "^FAIL .*Navi48,ProvisionedThisBoot" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n%s\n' '22:09:13 probe: Navi 44 RX 9060 XT (0x7590) — bring-up enabled' "$LOG_OK" > "$C/log-before.txt"
+check_match "inert-at-boot fails when probe ran a ladder before arming, even without an inert line" "^FAIL .*bring-up enabled" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n%s\n%s\n' "$INERT" '22:09:12 probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1' "$LOG_OK" > "$C/log-before.txt"
 check_match "inert-at-boot fails when a token was consumed before arming" "^FAIL .*consumed before" "$(evaluate_criterion inert-at-boot "$C")"
-inert_fixture; printf '%s\n%s\n' "$INERT" '22:09:13 probe: Navi 44 RX 9060 XT (0x7590) — bring-up enabled' > "$C/log-before.txt"
+inert_fixture; printf '%s\n%s\n%s\n' "$INERT" '22:09:13 probe: Navi 44 RX 9060 XT (0x7590) — bring-up enabled' "$LOG_OK" > "$C/log-before.txt"
 check_match "inert-at-boot fails when probe enabled the bring-up before arming" "^FAIL .*bring-up enabled" "$(evaluate_criterion inert-at-boot "$C")"
 inert_fixture; printf '      "Navi48,StageReached" = 1\nioreg-read-ok\n' > "$C/ioreg-before.txt"
 check_match "inert-at-boot fails on a Navi48,Stage property before arming" "^FAIL .*Navi48,Stage" "$(evaluate_criterion inert-at-boot "$C")"
@@ -309,6 +324,27 @@ check "result_table exits 0 on PASS" "0" "$(result_table "$R" 2 >/dev/null; echo
 T=$(result_table "$R" 3)
 check_match "a cycle that never ran shows as a dash" "^ssh-return +PASS +PASS +-" "$T"
 check_match "and the run fails" "^OVERALL: FAIL .*2/3 cycles" "$T"
+
+# --- boot_log_lines: this boot's kernel log, by boot UUID (kern.bootsessionuuid), from `log show --style ndjson` ---
+# Shapes from the bench's `log show --style ndjson` on 2026-10-30 (keys trimmed): the run's log.txt got the
+# previous boot's (01A2D260) inert line through the old --start <kern.boottime> filter.
+CUR=29551BDC-AA5E-48C4-AF8F-39D94BC4041C PREV=01A2D260-37ED-48D8-872B-A5F1B953D9C5
+{
+    echo "$CUR"
+    echo '{"messageType":"Default","bootUUID":"'"$PREV"'","timestamp":"2026-10-30 03:08:41.1+0300","eventMessage":"Navi48Bringup: probe: not armed — inert (no navi48-arm token in NVRAM; arm after login with nvram navi48-arm=stage:N)","processID":0}'
+    echo '{"messageType":"Default","bootUUID":"'"$CUR"'","eventMessage":"installation check: bundle for com.navi48.bringup is at \/Users\/pc\/navi-stage\/kext\/Navi48Bringup.kext","processID":124}'
+    echo '{"messageType":"Default","bootUUID":"'"$CUR"'","timestamp":"2026-10-30 03:12:31.2+0300","eventMessage":"Navi48Bringup: probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1","processID":0}'
+    echo '{"bootUUID":"'"$CUR"'","eventMessage":"Navi48Bringup: dcn: path \/a\/b says \"hi\" and a\\b","processID":0}'
+    echo '{"bootUUID":"'"$CUR"'","processID":0}'
+} > "$TMP/ndjson.txt"
+check "boot_log_lines keeps only this boot's Navi48Bringup lines, prefix stripped and JSON-unescaped, then the read marker" \
+    "probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1
+dcn: path /a/b says \"hi\" and a\\b
+log-read-ok $CUR" "$(boot_log_lines < "$TMP/ndjson.txt")"
+check "boot_log_lines writes nothing (no read marker) when the boot UUID was not read" "" \
+    "$(printf '\n{"bootUUID":"","eventMessage":"Navi48Bringup: probe: x"}\n' | boot_log_lines)"
+printf '%s\n' "$CUR" | boot_log_lines > /dev/null; check "boot_log_lines succeeds on a boot with no lines" 0 $?
+printf '\n' | boot_log_lines > /dev/null; check "boot_log_lines fails without a boot UUID" 1 $?
 
 printf '%d passed, %d failed\n' "$passes" "$fails"
 [ "$fails" -eq 0 ]
