@@ -2,8 +2,9 @@
 //  Navi48Bringup.hpp — Phase 3 GPU bring-up service for Navi 48 (gfx1201)
 //  on x86 macOS (Hackintosh).
 //
-//  A plain IOService on the GPU's IOPCIDevice, opt-in via boot-arg
-//  "navi48bringup=1". With both this and RDNA4FB installed, RDNA4FB owns the
+//  A plain IOService on the GPU's IOPCIDevice, armed per match by the consume-once
+//  NVRAM token "navi48-arm=stage:N" (ticket #16, amd/arm_token_pure.h; the old
+//  navi48bringup / navi48-stage boot-args no longer arm). With both this and RDNA4FB installed, RDNA4FB owns the
 //  display unless disabled with "rdna4-off=1".
 //
 //  Stages (each gated; later ones only run when explicitly requested):
@@ -113,6 +114,7 @@ private:
 	void surveyIPs();
 	void surveyPSP();
 	void surveySMU();
+	bool stageIPDiscovery();   // ticket #16: stage 1, the Navi 44 gc_info geometry gate
 	void stagePSP();       // navi48-psp=1 (== navi48-stage=5)
 	bool buildDeviceContext();   // fills `dev` for the ported amdgpu modules
 	bool mapDoorbells();         // BAR2 -> dev.bar2 (CP/MES/SDMA stages)

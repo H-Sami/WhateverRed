@@ -7,7 +7,7 @@ set -u
 what=${1:-all}
 if [[ $what == all || $what == log ]]; then
   echo "=== Navi48Bringup kernel log (this boot: up $(uptime | sed -E 's/.*up ([^,]*),.*/\1/')) ==="
-  mins=$(( $(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+).*/\1/' | xargs -I{} sh -c 'echo $(( ($(date +%s) - {}) / 60 + 2 ))') ))
+  mins=$(( $(sysctl -n kern.boottime | sed -E 's/.*[{] sec = ([0-9]+).*/\1/' | xargs -I{} sh -c 'echo $(( ($(date +%s) - {}) / 60 + 2 ))') ))
   sudo log show --last "${mins}m" --info --predicate 'process == "kernel" AND eventMessage CONTAINS "Navi48Bringup"' --style compact 2>/dev/null \
     | grep -v '^Timestamp\|^Filtering' | sed -E 's/^[0-9-]+ ([0-9:.]+)[^N]*Navi48Bringup: /\1 /'
 fi

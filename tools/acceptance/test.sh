@@ -46,7 +46,7 @@ check_match "a relative path is refused" "absolute" "$(kext_path_problem navi-st
 check_match "a non-kext is refused" "kext" "$(kext_path_problem /Users/pc/navi-stage/foo)"
 check_match "a path with spaces is refused" "space" "$(kext_path_problem '/Users/pc/my stage/N.kext')"
 
-# --- disarm / arm -----------------------------------------------------------------------------------
+# --- disarm / cycle boot-args / the arming token -----------------------------------------------------------------------------------
 CLEAN='-v debug=0x100 keepsyms=1 revpatch=sbvmm amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0'
 check "disarm strips exactly the NVIDIA args from the bench's args" "$CLEAN" "$(disarmed_args "$BENCH")"
 check "disarm strips the arming arg, the stage and any other navi48 arg" "$CLEAN" \
@@ -54,17 +54,45 @@ check "disarm strips the arming arg, the stage and any other navi48 arg" "$CLEAN
 check "disarm drops an unlisted nv* arg too" "-v" "$(disarmed_args "-v nvda_drv=1")"
 check "disarm is idempotent" "$CLEAN" "$(disarmed_args "$(disarmed_args "$BENCH")")"
 check "disarm of nothing is nothing" "" "$(disarmed_args "")"
-check "arm = disarmed args + navi48bringup=1" "$CLEAN navi48bringup=1" "$(armed_args "$BENCH")"
-check "arm with a stage target" "$CLEAN navi48bringup=1 navi48-stage=17" "$(armed_args "$BENCH" 17)"
-check "arm replaces an old stage target" "-v navi48bringup=1 navi48-stage=3" \
-    "$(armed_args "-v navi48bringup=1 navi48-stage=9" 3)"
-check "arm with extra ladder args" "-v navi48bringup=1 navi48-stage=17 navi48-kcq=0" \
-    "$(armed_args "-v" 17 "navi48-kcq=0")"
-check "arm refuses a post-ladder extra arg" "1" "$(armed_args "-v" "" "navi48-native=1" >/dev/null 2>&1; echo $?)"
-check "arm refuses a non-numeric stage" "1" "$(armed_args "-v" "x" >/dev/null 2>&1; echo $?)"
+# The cycle boots UNARMED: the boot-args are the disarmed args plus any extra ladder args (read by start()
+# once armed), never navi48bringup / navi48-stage (ignored by the kext; an old AuxKC build would arm on them).
+check "cycle args = disarmed args" "$CLEAN" "$(cycle_args "$BENCH")"
+check "cycle args drop an old arming arg and stage" "-v" "$(cycle_args "-v navi48bringup=1 navi48-stage=9")"
+check "cycle args add extra ladder args" "-v navi48-kcq=0 navi48-psp=1" "$(cycle_args "-v" "navi48-kcq=0" "navi48-psp=1")"
+check "cycle args refuse a post-ladder extra" "1" "$(cycle_args "-v" "navi48-native=1" >/dev/null 2>&1; echo $?)"
+check "cycle args refuse navi48bringup as an extra (the token arms)" "1" "$(cycle_args "-v" "navi48bringup=1" >/dev/null 2>&1; echo $?)"
+check "cycle args refuse navi48-stage as an extra (the token names the stage)" "1" "$(cycle_args "-v" "navi48-stage=3" >/dev/null 2>&1; echo $?)"
 check "is_armed sees navi48bringup=1" "yes" "$(is_armed "-v navi48bringup=1" && echo yes)"
 check "is_armed: navi48bringup=0 is not armed" "no" "$(is_armed "-v navi48bringup=0" || echo no)"
 check "is_armed: bare navi48bringup is armed (PE_parse_boot_argn reads 1)" "yes" "$(is_armed "navi48bringup" && echo yes)"
+# arm_token mirrors the kext's grammar (amd/arm_token_pure.h): stage:N, N 1..17, no leading zero.
+check "the token for stage 1" "stage:1" "$(arm_token 1)"
+check "the token for stage 17 (ComputeDispatch)" "stage:17" "$(arm_token 17)"
+for bad in 0 18 99 01 "" x 1x -1; do
+    check "arm_token refuses '$bad'" "1" "$(arm_token "$bad" >/dev/null 2>&1; echo $?)"
+done
+check "the token lives in navi48-arm" "navi48-arm" "$ARM_KEY"
+check "the harness arms only after 120 s of uptime (the kext's floor is 90 s)" "120" "$ARM_MIN_UPTIME"
+check "the token write" "sudo -n nvram navi48-arm=stage:9" "$(arm_set_cmd stage:9)"
+check "the token delete" "sudo -n nvram -d navi48-arm" "$ARM_DELETE_CMD"
+check_match "the token read lists navi48-arm and marks a successful read" 'nvram -p.*\^navi48-arm.*nvram-read-ok' "$ARM_READ_CMD"
+# token_state <file>: what a token read (ARM_READ_CMD's output) found.
+printf 'nvram-read-ok\n' > "$TMP/tok"
+check "no token line + read ok = absent" "absent" "$(token_state "$TMP/tok")"
+printf 'navi48-arm\tstage:1\nnvram-read-ok\n' > "$TMP/tok"
+check "a token line = present + value" "present stage:1" "$(token_state "$TMP/tok")"
+printf 'navi48-arm\tstage:1\n' > "$TMP/tok"
+check "no read-ok marker = unread (SSH or nvram failed)" "unread" "$(token_state "$TMP/tok")"
+check "a missing file = unread" "unread" "$(token_state "$TMP/nope")"
+printf 'navi48-armx\tstage:1\nnvram-read-ok\n' > "$TMP/tok"
+check "another variable is not the token" "absent" "$(token_state "$TMP/tok")"
+check "token_state reads a pipe (accept.sh: token_read | token_state /dev/stdin)" "present stage:3" \
+    "$(printf 'navi48-arm\tstage:3\nnvram-read-ok\n' | token_state /dev/stdin)"
+check "an empty pipe is unread" "unread" "$(printf '' | token_state /dev/stdin)"
+# the re-match: drop the personalities (terminate + remove from the IOCatalogue), then load/re-send them
+check "rematch step 1 removes the personalities" "sudo -n kmutil unload -b com.navi48.bringup -P" "$REMATCH_UNLOAD_CMD"
+check "rematch step 2 loads the AuxKC kext by id and re-sends its personality" \
+    "sudo -n kmutil load -b com.navi48.bringup -P Navi48Bringup" "$REMATCH_LOAD_CMD"
 
 # --- console integrity ----------------------------------------------------------------------------------
 # A 32x18 "desktop": varied gradients, like fbread's block averages of a real screen.
@@ -120,11 +148,36 @@ check_match "no-attach passes with no instance" "^PASS" "$(evaluate_criterion no
 printf '%s\n' '22:10:01 probe: 0x75901002 not Navi 48, ignoring' > "$C/log.txt"
 check_match "expect-log passes on a matching line" "^PASS" "$(evaluate_criterion "log probe: 0x[0-9a-f]+ not Navi 48" "$C")"
 check_match "expect-log fails without one" "^FAIL" "$(evaluate_criterion "log stages: ladder" "$C")"
+cp "$C/log.txt" "$TMP/log.keep"; printf 'log-read-ok 29551BDC-AA5E-48C4-AF8F-39D94BC4041C\n' >> "$C/log.txt"
+check_match "expect-log never matches kernel_log's read marker" "^FAIL" "$(evaluate_criterion "log read-ok" "$C")"
+cp "$TMP/log.keep" "$C/log.txt"
 
-printf '%s\n' "-v keepsyms=1 navi48bringup=1 navi48-stage=17" > "$C/armed-bootargs.txt"
-check_match "armed-boot passes when the running boot is armed" "^PASS" "$(evaluate_criterion armed-boot "$C")"
-printf '%s\n' "-v keepsyms=1" > "$C/armed-bootargs.txt"
-check_match "armed-boot fails when OpenCore dropped the arg" "^FAIL" "$(evaluate_criterion armed-boot "$C")"
+# the navi44-stage1 preset against a capture of what stage 1 publishes on the 9060 XT
+cat > "$C/ioreg.txt" <<'IOREG'
++-o Navi48Bringup  <class Navi48Bringup, id 0x100000abc, registered, matched, active, busy 0 (0 ms), retain 7>
+    {
+      "IOPCIPrimaryMatch" = "0x75901002"
+      "Navi48,StageTarget" = 1
+      "Navi48,StageReached" = 1
+      "Navi48,StageReachedName" = "IPDiscovery"
+      "Navi48,GeometrySE" = 2
+      "Navi48,GeometrySAPerSE" = 2
+      "Navi48,GeometryCUPerSA" = 8
+      "Navi48,GeometryRB" = 8
+      "Navi48,Geometry" = "2/2/8/8"
+      "Navi48,GeometryCheck" = "accepted"
+    }
+IOREG
+printf '%s\n' '22:10:01 probe: Navi 44 RX 9060 XT (0x7590) - bring-up enabled' > "$C/log.txt"
+check "navi44-stage1 preset has 11 criteria" "11" "$(expect_preset navi44-stage1 | wc -l | tr -d ' ')"
+check "an unknown preset is refused" "1" "$(expect_preset nope >/dev/null; echo $?)"
+pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage1)"
+check "navi44-stage1 passes on a good stage-1 capture" "0" "$pf"
+sed 's/"Navi48,GeometryRB" = 8/"Navi48,GeometryRB" = 7/' "$C/ioreg.txt" > "$C/i2" && mv "$C/i2" "$C/ioreg.txt"
+printf '%s\n' '22:10:01 probe: 0x75501002 not Navi 44, ignoring' > "$C/log.txt"
+pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage1)"
+check "navi44-stage1 fails on a wrong RB count and no probe line" "2" "$pf"
+
 printf '%s\n' "$CLEAN" > "$C/nvram-after-disarm.txt"
 check_match "disarmed passes on clean NVRAM" "^PASS" "$(evaluate_criterion disarmed "$C")"
 printf '%s\n' "$CLEAN gfxrst=4" > "$C/nvram-after-disarm.txt"
@@ -132,12 +185,71 @@ check_match "disarmed names an NVIDIA leftover" "^FAIL .*gfxrst" "$(evaluate_cri
 printf '%s\n' "$CLEAN navi48bringup=1" > "$C/nvram-after-disarm.txt"
 check_match "disarmed names a leftover arming arg" "^FAIL .*navi48bringup" "$(evaluate_criterion disarmed "$C")"
 
-printf 'aux 3b6c\nboot-paths\n' > "$C/safety-before.txt"; cp "$C/safety-before.txt" "$C/safety-after.txt"
-check_match "never-at-boot passes when nothing changed" "^PASS" "$(evaluate_criterion never-at-boot "$C")"
-printf 'aux 9999\nboot-paths\n' > "$C/safety-after.txt"
-check_match "never-at-boot fails when the AuxKC changed" "^FAIL .*AuxKC" "$(evaluate_criterion never-at-boot "$C")"
-printf 'aux 3b6c\nboot-paths /Library/Extensions/Navi48Bringup.kext\n' > "$C/safety-after.txt"
-check_match "never-at-boot fails on a kext in a boot path" "^FAIL .*Library/Extensions" "$(evaluate_criterion never-at-boot "$C")"
+# inert-at-boot: before arming, the boot-time match left the kext inert and nothing was installed for boot.
+LOG_OK='log-read-ok 29551BDC-AA5E-48C4-AF8F-39D94BC4041C'
+INERT='22:09:12 probe: not armed — inert (no navi48-arm token in NVRAM; arm after login with nvram navi48-arm=stage:N)'
+inert_fixture() {
+    printf '%s\n' "-v keepsyms=1" > "$C/boot-bootargs.txt"
+    printf 'nvram-read-ok\n' > "$C/token-before.txt"
+    printf '+-o Root  <class IORegistryEntry, id 0x100000100, retain 20>\nioreg-read-ok\n' > "$C/ioreg-before.txt"
+    printf '%s\n%s\n' "$INERT" "$LOG_OK" > "$C/log-before.txt"
+    printf 'aux 8d5f\nboot-paths\nauxkc com.navi48.bringup\n' > "$C/safety-boot.txt"
+    cp "$C/safety-boot.txt" "$C/safety-before.txt"; cp "$C/safety-boot.txt" "$C/safety-after.txt"
+}
+inert_fixture
+check_match "inert-at-boot passes on an inert boot, naming the AuxKC member" "^PASS .*inert.*8d5f.*com.navi48.bringup" "$(evaluate_criterion inert-at-boot "$C")"
+printf 'navi48-arm\tstage:1\nnvram-read-ok\n' > "$C/token-before.txt"
+check_match "inert-at-boot fails when a token was in NVRAM before arming" "^FAIL .*token.*stage:1" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf 'nothing\n' > "$C/token-before.txt"
+check_match "inert-at-boot fails when NVRAM was not read" "^FAIL .*NVRAM.*not read" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n' "-v navi48bringup=1" > "$C/boot-bootargs.txt"
+check_match "inert-at-boot fails on a boot carrying navi48bringup (an old AuxKC build arms on it)" "^FAIL .*navi48bringup" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; rm "$C/boot-bootargs.txt"
+check_match "inert-at-boot fails when the boot's args were not read" "^FAIL .*kern.bootargs" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n' "$LOG_OK" > "$C/log-before.txt"
+check_match "inert-at-boot passes when the AuxKC kext was not matched at boot (no inert line on macOS 26.7.2)" \
+    "^PASS .*not matched at boot" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture
+check_match "inert-at-boot records the inert line as evidence when there is one" "^PASS .*inert line logged" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n' "$INERT" > "$C/log-before.txt"
+check_match "inert-at-boot fails when this boot's kernel log was not read" "^FAIL .*kernel log not read" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; : > "$C/log-before.txt"
+check_match "inert-at-boot fails on an empty log-before (the read never finished)" "^FAIL .*kernel log not read" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '      "Navi48,ProvisionedThisBoot" = Yes\nioreg-read-ok\n' > "$C/ioreg-before.txt"
+check_match "inert-at-boot fails on any Navi48,* property before arming" "^FAIL .*Navi48,ProvisionedThisBoot" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n%s\n' '22:09:13 probe: Navi 44 RX 9060 XT (0x7590) — bring-up enabled' "$LOG_OK" > "$C/log-before.txt"
+check_match "inert-at-boot fails when probe ran a ladder before arming, even without an inert line" "^FAIL .*bring-up enabled" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n%s\n%s\n' "$INERT" '22:09:12 probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1' "$LOG_OK" > "$C/log-before.txt"
+check_match "inert-at-boot fails when a token was consumed before arming" "^FAIL .*consumed before" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '%s\n%s\n%s\n' "$INERT" '22:09:13 probe: Navi 44 RX 9060 XT (0x7590) — bring-up enabled' "$LOG_OK" > "$C/log-before.txt"
+check_match "inert-at-boot fails when probe enabled the bring-up before arming" "^FAIL .*bring-up enabled" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '      "Navi48,StageReached" = 1\nioreg-read-ok\n' > "$C/ioreg-before.txt"
+check_match "inert-at-boot fails on a Navi48,Stage property before arming" "^FAIL .*Navi48,Stage" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '+-o Navi48Bringup  <class Navi48Bringup, id 0x1>\nioreg-read-ok\n' > "$C/ioreg-before.txt"
+check_match "inert-at-boot fails on an attached instance before arming" "^FAIL .*instance" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf '+-o Root\n' > "$C/ioreg-before.txt"
+check_match "inert-at-boot fails when the IORegistry was not read" "^FAIL .*IORegistry.*not read" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf 'aux 9999\nboot-paths\n' > "$C/safety-after.txt"
+check_match "inert-at-boot fails when the AuxKC changed during the cycle" "^FAIL .*AuxKC changed" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; printf 'aux 8d5f\nboot-paths /Library/Extensions/Navi48Bringup.kext\n' > "$C/safety-after.txt"
+check_match "inert-at-boot fails on a kext in a boot path" "^FAIL .*Library/Extensions" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture; rm "$C/safety-boot.txt"
+check_match "inert-at-boot fails when a safety snapshot is missing" "^FAIL .*snapshot" "$(evaluate_criterion inert-at-boot "$C")"
+inert_fixture
+
+# token-consumed: after the re-match the token is gone from NVRAM and the kext says it deleted it.
+printf 'nvram-read-ok\n' > "$C/token-after.txt"
+printf '%s\n' '22:12:40 probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1' > "$C/log.txt"
+check_match "token-consumed passes when it is gone and the kext logged the consume" "^PASS .*consumed" "$(evaluate_criterion token-consumed "$C")"
+printf 'navi48-arm\tstage:1\nnvram-read-ok\n' > "$C/token-after.txt"
+check_match "token-consumed fails while the token is still in NVRAM (probe never ran)" "^FAIL .*still in NVRAM.*stage:1" "$(evaluate_criterion token-consumed "$C")"
+printf 'nvram-read-' > "$C/token-after.txt"
+check_match "token-consumed fails when NVRAM was not read" "^FAIL .*not read" "$(evaluate_criterion token-consumed "$C")"
+printf 'nvram-read-ok\n' > "$C/token-after.txt"; : > "$C/log.txt"
+check_match "token-consumed fails when the token vanished without the kext's consume line" "^FAIL .*no .token consumed. line" "$(evaluate_criterion token-consumed "$C")"
+check "the default criteria, in order" "ssh-return disarmed inert-at-boot kext-loaded token-consumed ssh-alive console" "$(printf '%s\n' "$CRITERIA" | tr '\n' ' ' | sed 's/ $//')"
+check_match "armed-boot is gone (the boot is unarmed now)" "^FAIL unknown criterion" "$(evaluate_criterion armed-boot "$C")"
+check_match "never-at-boot is gone (inert-at-boot replaces it)" "^FAIL unknown criterion" "$(evaluate_criterion never-at-boot "$C")"
 
 echo 30 > "$C/ssh-return.txt"
 check_match "ssh-return passes with the seconds" "^PASS .*30 s" "$(evaluate_criterion ssh-return "$C")"
@@ -212,6 +324,27 @@ check "result_table exits 0 on PASS" "0" "$(result_table "$R" 2 >/dev/null; echo
 T=$(result_table "$R" 3)
 check_match "a cycle that never ran shows as a dash" "^ssh-return +PASS +PASS +-" "$T"
 check_match "and the run fails" "^OVERALL: FAIL .*2/3 cycles" "$T"
+
+# --- boot_log_lines: this boot's kernel log, by boot UUID (kern.bootsessionuuid), from `log show --style ndjson` ---
+# Shapes from the bench's `log show --style ndjson` on 2026-10-30 (keys trimmed): the run's log.txt got the
+# previous boot's (01A2D260) inert line through the old --start <kern.boottime> filter.
+CUR=29551BDC-AA5E-48C4-AF8F-39D94BC4041C PREV=01A2D260-37ED-48D8-872B-A5F1B953D9C5
+{
+    echo "$CUR"
+    echo '{"messageType":"Default","bootUUID":"'"$PREV"'","timestamp":"2026-10-30 03:08:41.1+0300","eventMessage":"Navi48Bringup: probe: not armed — inert (no navi48-arm token in NVRAM; arm after login with nvram navi48-arm=stage:N)","processID":0}'
+    echo '{"messageType":"Default","bootUUID":"'"$CUR"'","eventMessage":"installation check: bundle for com.navi48.bringup is at \/Users\/pc\/navi-stage\/kext\/Navi48Bringup.kext","processID":124}'
+    echo '{"messageType":"Default","bootUUID":"'"$CUR"'","timestamp":"2026-10-30 03:12:31.2+0300","eventMessage":"Navi48Bringup: probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1","processID":0}'
+    echo '{"bootUUID":"'"$CUR"'","eventMessage":"Navi48Bringup: dcn: path \/a\/b says \"hi\" and a\\b","processID":0}'
+    echo '{"bootUUID":"'"$CUR"'","processID":0}'
+} > "$TMP/ndjson.txt"
+check "boot_log_lines keeps only this boot's Navi48Bringup lines, prefix stripped and JSON-unescaped, then the read marker" \
+    "probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target 1
+dcn: path /a/b says \"hi\" and a\\b
+log-read-ok $CUR" "$(boot_log_lines < "$TMP/ndjson.txt")"
+check "boot_log_lines writes nothing (no read marker) when the boot UUID was not read" "" \
+    "$(printf '\n{"bootUUID":"","eventMessage":"Navi48Bringup: probe: x"}\n' | boot_log_lines)"
+printf '%s\n' "$CUR" | boot_log_lines > /dev/null; check "boot_log_lines succeeds on a boot with no lines" 0 $?
+printf '\n' | boot_log_lines > /dev/null; check "boot_log_lines fails without a boot UUID" 1 $?
 
 printf '%d passed, %d failed\n' "$passes" "$fails"
 [ "$fails" -eq 0 ]

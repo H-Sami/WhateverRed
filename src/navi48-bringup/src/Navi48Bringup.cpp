@@ -10,6 +10,9 @@
 #include "regs.hpp"
 #include "amd/amdgpu_discovery.h"
 #include "amd/amdgpu_init.h"
+#include "amd/navi44_identity_pure.h"   // ticket #16: the RX 9060 XT identity (probe, IP versions, gc_info geometry)
+#include "amd/arm_token_pure.h"        // ticket #16: the consume-once NVRAM arming token (navi48-arm=stage:N)
+#include <IOKit/IODeviceTreeSupport.h> // gIODTPlane (/options = IODTNVRAM)
 #include "amd/amdgpu_regs.h"
 #include "amd/amdgpu_sdma.h"
 #include "Navi48MetalNub.hpp"   // 0.0.610: terminate a published Metal nub at stop
@@ -518,7 +521,48 @@ void Navi48Bringup::surveyIPs() {
 		snprintf(key, sizeof(key), "IP,%s", w.name);
 		snprintf(ver, sizeof(ver), "%u.%u.%u", ip.major, ip.minor, ip.revision);
 		setProperty(key, ver);
+		// Ticket #16: log (only) where the card differs from the Navi 44 identity the pins assume.
+		if (const n44id::IpVer *want = n44id::expected_ip(w.id))
+			if (!n44id::same_ver(*want, ip.major, ip.minor, ip.revision))
+				N48LOG("ip: %-5s v%u.%u.%u differs from the Navi 44 identity's v%u.%u.%u", w.name, ip.major, ip.minor, ip.revision,
+				       want->major, want->minor, want->rev);
 	}
+}
+
+// Ticket #16: stage 1 (IPDiscovery) on Navi 44. The on-die binary validated (loadOnDieDiscovery) and the IPs
+// were surveyed; here the GC table (gc_info) is parsed and its geometry checked against 2 SE / 2 SA / 8 CU / 8 RB.
+// Publishes the discovered geometry always, and the stage result when navi48-stage asks for a ladder (runStages,
+// reached only for targets above 5, overwrites it). Returns false when the ladder must stop here.
+bool Navi48Bringup::stageIPDiscovery() {
+	const n44id::GcInfo gi = n44id::parse_gc_info(onDieDisc + ipDiscovery.binaryOffset(), n48::kDiscTmrSize - ipDiscovery.binaryOffset());
+	const uint32_t why = gi.reason != n44id::kOk ? gi.reason : n44id::check_geometry(gi.geo);
+	if (gi.reason == n44id::kOk) {
+		char geo[48];
+		snprintf(geo, sizeof(geo), "%u/%u/%u/%u", gi.geo.se, gi.geo.saPerSe, gi.geo.cuPerSa, gi.geo.rb);
+		setProperty("Navi48,GeometrySE", static_cast<uint64_t>(gi.geo.se), 32);
+		setProperty("Navi48,GeometrySAPerSE", static_cast<uint64_t>(gi.geo.saPerSe), 32);
+		setProperty("Navi48,GeometryCUPerSA", static_cast<uint64_t>(gi.geo.cuPerSa), 32);
+		setProperty("Navi48,GeometryRB", static_cast<uint64_t>(gi.geo.rb), 32);
+		setProperty("Navi48,Geometry", geo);
+		N48LOG("discovery: gc_info v%u.%u: %u SE, %u SA per SE, %u CU per SA, %u RB", gi.verMajor, gi.verMinor,
+		       gi.geo.se, gi.geo.saPerSe, gi.geo.cuPerSa, gi.geo.rb);
+	}
+	setProperty("Navi48,GeometryCheck", why == n44id::kOk ? "accepted" : n44id::reason_name(why));
+	if (why != n44id::kOk) N48LOG("discovery: Navi 44 identity check REFUSED: %s — the ladder stops at stage 1", n44id::reason_name(why));
+	if (targetStage) {
+		setProperty("Navi48,StageTarget", static_cast<uint64_t>(targetStage), 32);
+		const amdgpu::BringupStage reached = why == n44id::kOk ? amdgpu::BringupStage::IPDiscovery : amdgpu::BringupStage::None;
+		setProperty("Navi48,StageReached", static_cast<uint64_t>(reached), 32);
+		setProperty("Navi48,StageReachedName", amdgpu::stage_name(reached));
+		setProperty("Navi48,StageResult", static_cast<uint64_t>(why == n44id::kOk ? kIOReturnSuccess : kIOReturnUnsupported), 32);
+		if (why != n44id::kOk) {
+			setProperty("Navi48,StageFailed", amdgpu::stage_name(amdgpu::BringupStage::IPDiscovery));
+			setProperty("Navi48,StageFailedReason", n44id::reason_name(why));
+		}
+		N48LOG("stages: stage 1 %s — reached %u (%s)", why == n44id::kOk ? "passed" : "FAILED",
+		       static_cast<unsigned>(reached), amdgpu::stage_name(reached));
+	}
+	return why == n44id::kOk;
 }
 
 void Navi48Bringup::surveyPSP() {
@@ -7324,18 +7368,73 @@ void Navi48Bringup::publishInterruptCounters() {
 // IOService lifecycle
 // ---------------------------------------------------------------------------
 
+static_assert(n48arm::kStageMax == static_cast<uint32_t>(amdgpu::BringupStage::Max), "the arming token's top stage is the ladder's last");
+
+// Ticket #16: the arming gate. The kext sits in the Auxiliary KC and IOKit matches it at every boot, so it is inert unless
+// armed after login by the NVRAM variable navi48-arm (n48arm::kNvramKey). Consume-once: read it, DELETE it, read it again,
+// and arm only if it is gone, so a panic or reset after this point always comes back unarmed. A token that is present
+// is deleted whether it parses or not. Only IORegistryEntry virtuals are called on /options (copyProperty / removeProperty,
+// overridden by IODTNVRAM): no IODTNVRAM-specific vtable slot of the SDK's older header is used. On x86 macOS the
+// AppleEFINVRAM subclass commits a delete through EFI SetVariable straight away (unverified on the bench: the next
+// boot's inert-at-boot check proves it); the second read only proves the in-kernel copy is gone.
+static n48arm::Decision consumeArmToken() {
+	uint8_t buf[n48arm::kCopyLen] = {};
+	size_t len = 0;
+	bool present = false, consumed = false, isNvram = false;
+	IORegistryEntry *opts = IORegistryEntry::fromPath("/options", gIODTPlane);
+	if (opts && opts->metaCast("IODTNVRAM")) {
+		isNvram = true;
+		OSObject *o = opts->copyProperty(n48arm::kNvramKey);
+		if (o) {
+			present = true;
+			if (OSData *d = OSDynamicCast(OSData, o)) {
+				len = d->getLength() < sizeof(buf) ? d->getLength() : sizeof(buf);
+				if (len) memcpy(buf, d->getBytesNoCopy(), len);
+			} else if (OSString *str = OSDynamicCast(OSString, o)) {
+				len = str->getLength() < sizeof(buf) ? str->getLength() : sizeof(buf);
+				if (len) memcpy(buf, str->getCStringNoCopy(), len);
+			}
+			o->release();
+			if (const OSSymbol *key = OSSymbol::withCString(n48arm::kNvramKey)) { opts->removeProperty(key); key->release(); }
+			OSObject *again = opts->copyProperty(n48arm::kNvramKey);
+			consumed = (again == nullptr);
+			if (again) again->release();
+		}
+	}
+	if (opts) opts->release();
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+	const uint64_t uptimeS = ns / 1000000000ULL;
+	const n48arm::Decision arm = n48arm::decide(present, buf, len, consumed, uptimeS);
+	if (!isNvram) N48LOG("probe: no IODTNVRAM at /options — cannot read the navi48-arm token");
+	if (!present) {
+		N48LOG("probe: not armed — inert (%s; arm after login with nvram navi48-arm=stage:N)", n48arm::reason_name(arm.reason));
+	} else if (!consumed) {
+		N48LOG("probe: not armed — inert: navi48-arm token present but %s; refusing to arm", n48arm::reason_name(arm.reason));
+	} else if (!arm.armed) {
+		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM), %u byte(s), uptime %llu s, refused: %s; not armed — inert",
+		       static_cast<unsigned>(len), static_cast<unsigned long long>(uptimeS), n48arm::reason_name(arm.reason));
+	} else {
+		N48LOG("probe: navi48-arm token consumed (deleted from NVRAM) — armed for this match, stage target %u", arm.stage);
+	}
+	uint32_t old = 0;
+	if (PE_parse_boot_argn("navi48bringup", &old, sizeof(old)) || PE_parse_boot_argn("navi48-stage", &old, sizeof(old)))
+		N48LOG("probe: the navi48bringup / navi48-stage boot-args are ignored (the navi48-arm token arms and names the stage)");
+	return arm;
+}
+
 IOService *Navi48Bringup::probe(IOService *provider, SInt32 *score) {
-	uint32_t on = 0;
-	if (!PE_parse_boot_argn("navi48bringup", &on, sizeof(on)) || on == 0) return nullptr;
+	const n48arm::Decision arm = consumeArmToken();   // FIRST: nothing else runs on an unarmed match
+	if (!arm.armed) return nullptr;
+	targetStage = arm.stage;
 	if (!super::probe(provider, score)) return nullptr;
 	auto *pci = OSDynamicCast(IOPCIDevice, provider);
 	if (!pci) return nullptr;
 	uint32_t vendorDevice = pci->configRead32(kIOPCIConfigVendorID);
-	uint16_t device = static_cast<uint16_t>(vendorDevice >> 16);
-	if ((vendorDevice & 0xffff) != 0x1002 || (device != 0x7550 && device != 0x7551)) {
-		N48LOG("probe: 0x%08x not Navi 48, ignoring", vendorDevice); return nullptr;
+	if (!n44id::accepts_device(vendorDevice)) {
+		N48LOG("probe: 0x%08x not Navi 44, ignoring", vendorDevice); return nullptr;
 	}
-	N48LOG("probe: Navi 48 %s (0x%04x) — bring-up enabled", device == 0x7550 ? "RX 9070/XT" : "R9700", device);
+	N48LOG("probe: Navi 44 RX 9060 XT (0x%04x) — bring-up enabled", static_cast<unsigned>(vendorDevice >> 16));
 	return this;
 }
 
@@ -7363,23 +7462,27 @@ bool Navi48Bringup::start(IOService *provider) {
 	if (!loadOnDieDiscovery()) {
 		N48LOG("start: IP discovery unavailable — MMIO works, but no register map");
 	} else {
+		// Ticket #16: the stage target came from the navi48-arm token in probe (targetStage), not a boot-arg.
+		if (targetStage) N48LOG("stages: navi48-arm stage:%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
 		surveyIPs();
-		surveyPSP();
-		surveySMU();
-		if (!PE_parse_boot_argn("navi48-stage", &targetStage, sizeof(targetStage))) targetStage = 0;
-		if (targetStage) N48LOG("stages: navi48-stage=%u (mac-amdgpu BringupStage numbering; 5 = PSP SOS)", targetStage);
-		// Arm the host side before the ladder so stage 2 (IHInit) can bring the
-		// ring up with ENABLE_INTR=1. The GPU cannot assert until then.
-		// On by default as of 0.0.35: proven on hardware — the MSI
-		// source arms, the IH ring runs with ENABLE_INTR=1, and the handler
-		// drains and classifies (6 interrupts / 7 entries / 4 EOP / 3 faults on
-		// a stage-17 run) with no storm. navi48-interrupts=0 falls back to the
-		// polled path, which is unchanged.
-		uint32_t wantIrq = 1;
-		PE_parse_boot_argn("navi48-interrupts", &wantIrq, sizeof(wantIrq));
-		if (wantIrq != 0) gBringup.wantInterrupts = armInterrupts();
-		stagePSP();        // no-op unless navi48-psp=1 or navi48-stage>=5
-		publishInterruptCounters();
+		// Ticket #16: stage 1 (IPDiscovery). The card's own gc_info must give the Navi 44 geometry before
+		// anything past the read-only IP survey runs; on a mismatch the ladder stops here, reason published.
+		if (stageIPDiscovery()) {
+			surveyPSP();
+			surveySMU();
+			// Arm the host side before the ladder so stage 2 (IHInit) can bring the
+			// ring up with ENABLE_INTR=1. The GPU cannot assert until then.
+			// On by default as of 0.0.35: proven on hardware — the MSI
+			// source arms, the IH ring runs with ENABLE_INTR=1, and the handler
+			// drains and classifies (6 interrupts / 7 entries / 4 EOP / 3 faults on
+			// a stage-17 run) with no storm. navi48-interrupts=0 falls back to the
+			// polled path, which is unchanged.
+			uint32_t wantIrq = 1;
+			PE_parse_boot_argn("navi48-interrupts", &wantIrq, sizeof(wantIrq));
+			if (wantIrq != 0) gBringup.wantInterrupts = armInterrupts();
+			stagePSP();        // no-op unless navi48-psp=1 or navi48-stage>=5
+			publishInterruptCounters();
+		}
 	}
 	// build 0.0.515: the read-only raster device the AGDC LINKCFG reply reads through
 	// (n48dcn::liveRaster), built here - after stagePSP built the device context, before the Phase 4 block below can install
