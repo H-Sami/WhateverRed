@@ -60,6 +60,11 @@ enum Navi48Selector {
     // the whole scanned-out surface. in: offset; out struct bytes (at most NAVI48_UC_MAX_XFER); out scalars: the capture's total
     // bytes (0 = none published), its number this boot. Read-only; `accel scanout 10` frees it. An older kext answers unsupported.
     kNavi48SelReadScanFull    = 18,
+    // ticket #18: the THM (hw id 3) temperature and fan-tach registers, read as they stand - no write, no SMU message.
+    // out struct Navi48ThermalRegs. A cross-check for the metrics table, NOT a trusted temperature: upstream SMU
+    // 14.0.2 reads no THM temperature or tach register (both come from the metrics table), so their decode on
+    // Navi 44 is unverified. An older kext answers unsupported.
+    kNavi48SelThermalRegs     = 19,
     kNavi48SelCount
 };
 
@@ -151,7 +156,29 @@ struct Navi48Metrics {
     uint32_t if_version;        // what the firmware reported
     uint32_t layout_verified;   // 1 only if if_version matches the layout
     uint32_t values_plausible;  // 1 if the decoded values pass range checks
-    uint32_t reserved[1];
+    uint32_t implausible_why;   // ticket #18: NAVI48_METRICS_WHY_* bits, 0 when plausible (was reserved[1])
+};
+
+// ticket #18: why the kext called a metrics sample implausible (Navi48Metrics.implausible_why). Any bit set means
+// the numbers must not be used as a temperature.
+#define NAVI48_METRICS_WHY_TABLE_ZERO     (1u << 0)  // every dword of the table read back zero
+#define NAVI48_METRICS_WHY_UNTOUCHED      (1u << 1)  // the table still holds the sentinel the kext filled it with
+#define NAVI48_METRICS_WHY_TEMP_LOW       (1u << 2)  // edge or hotspot below 5 C (no powered GPU reads that)
+#define NAVI48_METRICS_WHY_TEMP_HIGH      (1u << 3)  // edge or hotspot above 125 C
+#define NAVI48_METRICS_WHY_HOT_BELOW_EDGE (1u << 4)  // hotspot below edge
+#define NAVI48_METRICS_WHY_CLOCK          (1u << 5)  // gfx or mem clock above 4000 MHz
+#define NAVI48_METRICS_WHY_ACTIVITY       (1u << 6)  // gfx or mem activity above 100 %
+#define NAVI48_METRICS_WHY_PCIE_LINK      (1u << 7)  // PCIe gen outside 1..5 or width outside 1..32 (no live link)
+
+// ticket #18: THM registers as read (kNavi48SelThermalRegs). Offsets from thm_14_0_2_offset.h, segment 0 of the THM
+// IP (discovery hw id 3). Raw values only; the decode (navi48test) follows older ASICs and is UNVERIFIED here.
+struct Navi48ThermalRegs {
+    uint32_t thm_present;             // 1 if IP discovery lists THM instance 0 (else the rest is 0)
+    uint32_t tcon_cur_tmp;            // regTHM_TCON_CUR_TMP       0x00: CUR_TEMP [31:21] in 1/8 C, RANGE_SEL bit 19 (-49 C)
+    uint32_t cg_mult_thermal_status;  // regCG_MULT_THERMAL_STATUS 0x0f: CTF_TEMP [17:9] in C
+    uint32_t cg_tach_ctrl;            // regCG_TACH_CTRL           0x14: EDGE_PER_REV [2:0]
+    uint32_t cg_tach_status;          // regCG_TACH_STATUS         0x15: TACH_PERIOD, reference-clock ticks per period
+    uint32_t reserved[3];
 };
 
 struct Navi48Counters {

@@ -417,6 +417,13 @@ THERMAL_WATCH_SECONDS=600   # the watch: 10 minutes after the ladder (--thermal-
 THERMAL_WATCH_PERIOD=10     # seconds between samples
 THERMAL_JUNCTION_MAX=95     # FAIL above this junction (hotspot) temperature, C
 THERMAL_FAN_STOP_MAX=60     # FAIL on a fan at 0 rpm above this temperature (the hotter of edge and junction), C
+THERMAL_TEMP_MIN=5          # a sample whose edge or junction is below this is not a reading from a powered GPU, C
+THERMAL_TEMP_MAX=125        # ... nor above this, C
+# The THM registers (`navi48test metrics` "thm" line) as a fallback when the metrics sample is implausible. 0 = not
+# trusted: upstream SMU 14.0.2 reads no THM temperature or tach register (both come from the metrics table), so
+# their decode on Navi 44 is unverified and the watch fails closed instead. Set 1 only once a bench run has shown
+# the thm line tracking a trusted temperature.
+THERMAL_REG_TRUSTED=0
 stage_criteria() {   # stage_criteria <stage>: the criteria a run to that stage gets without asking
     [ "$1" -ge "$SMU_ONLINE_STAGE" ] 2>/dev/null || return 0
     printf '%s\n' idle-clamp thermal-watch
@@ -473,42 +480,82 @@ crit_idle_clamp() {
 #   thermal-watch start <epoch> period <s> duration <s>
 #   sample <n> <epoch> rc <exit code of `sudo -n navi48test metrics`>, then that command's output
 #   ... thermal-watch end <epoch>   (only when the whole duration ran)   or   thermal-watch refused: <why>
-# Junction = navi48test's "hotspot" (upstream smu_v14_0_2_ppt.c METRICS_TEMPERATURE_HOTSPOT). FAILs, first
-# reason wins: not collected, refused, a sample that failed or was implausible (the kext's range check),
-# no samples, a junction above THERMAL_JUNCTION_MAX, a stopped fan above THERMAL_FAN_STOP_MAX, a watch cut
-# short. Every verdict with samples carries the min/max/last of junction, edge and fan.
+# Junction = navi48test's "hotspot" (upstream smu_v14_0_2_ppt.c METRICS_TEMPERATURE_HOTSPOT).
+# Ticket #18, fail closed: a metrics sample counts only when it is plausible on its own terms, checked here
+# independently of the kext and navi48test (the bench of 2026-10-30 read an all-zero table both called
+# "passed"): a "range check: passed" line, a temps line with edge and junction inside THERMAL_TEMP_MIN..MAX,
+# and a link line with PCIe gen 1..5 and width 1..32. Otherwise the sample falls back to the "thm" line (the
+# THM registers) only if THERMAL_REG_TRUSTED=1; with no trusted register source it FAILs.
+# FAILs, first reason wins: not collected, refused, a sample that failed or was implausible with no trusted
+# fallback, no samples, a junction above THERMAL_JUNCTION_MAX, a stopped fan above THERMAL_FAN_STOP_MAX, a
+# watch cut short. Every verdict with usable samples carries the min/max/last of junction, edge and fan and
+# which source each sample came from ("source: metrics N[, registers M]").
 crit_thermal_watch() {
     local f="$1/thermal-watch.txt"
     [ -r "$f" ] || { echo "FAIL thermal watch not collected"; return; }
-    awk -v jmax="$THERMAL_JUNCTION_MAX" -v fmax="$THERMAL_FAN_STOP_MAX" '
+    awk -v jmax="$THERMAL_JUNCTION_MAX" -v fmax="$THERMAL_FAN_STOP_MAX" -v tmin="$THERMAL_TEMP_MIN" \
+        -v tmax="$THERMAL_TEMP_MAX" -v regok="$THERMAL_REG_TRUSTED" '
         function upd(k, v) { if (!((k, "n") in s)) { s[k, "min"] = v; s[k, "max"] = v; s[k, "n"] = 1 }
                              if (v < s[k, "min"]) s[k, "min"] = v; if (v > s[k, "max"]) s[k, "max"] = v; s[k, "last"] = v }
-        function mml(k) { return s[k, "min"] "/" s[k, "max"] "/" s[k, "last"] }
+        function mml(k) { return ((k, "n") in s) ? s[k, "min"] "/" s[k, "max"] "/" s[k, "last"] : "n/a" }
         function fail(m) { if (why == "") why = m }
-        function close_sample() {
+        function num(v) { return v ~ /^[0-9]+$/ }
+        function rules(jj, hot, fan) {
+            if (jj > jmax) fail("junction " jj " C > " jmax " C at sample " cur)
+            if (fan == 0 && hot > fmax) fail("fan 0 rpm at " hot " C at sample " cur)
+        }
+        # why the metrics of the current sample cannot be used ("" = they can)
+        function metrics_bad() {
+            if (bang) return "range check FAILED"
+            if (rcl == "") return "no range-check line"
+            if (rcl != "passed") return "range check " rcl
+            if (!temps) return "no temps line"
+            if (!num(e) || !num(j)) return "unreadable temps line"
+            if (e + 0 < tmin || j + 0 < tmin) return "edge " e " C / junction " j " C below " tmin " C"
+            if (e + 0 > tmax || j + 0 > tmax) return "edge " e " C / junction " j " C above " tmax " C"
+            if (!link) return "no link line"
+            if (!num(gen) || !num(wid) || gen + 0 < 1 || gen + 0 > 5 || wid + 0 < 1 || wid + 0 > 32)
+                return "PCIe gen " gen " x" wid " is no live link"
+            return ""
+        }
+        function close_sample(   r, jj, ff) {
             if (cur == "") return
-            if (rc != 0) fail("sample " cur " failed (rc " rc "): " first)
-            else if (bad) fail("sample " cur " implausible (the kext range check FAILED; the decode cannot be trusted)")
-            else if (!got) fail("sample " cur " has no temps line: " first)
+            if (rc != 0) { fail("sample " cur " failed (rc " rc "): " first); cur = ""; return }
+            r = metrics_bad()
+            if (r == "") {
+                nm++; upd("j", j + 0); upd("e", e + 0); upd("f", fn + 0)
+                rules(j + 0, (j + 0 > e + 0) ? j + 0 : e + 0, fn + 0)
+            } else if (regok != 1) {
+                fail("sample " cur " implausible (" r "); no trusted register source on SMU 14.0.2, so no temperature (thm: " (thm == "" ? "none" : thm) ")")
+            } else if (thm == "" || thm ~ /unavailable/ || !num(tc) || !num(ctf)) {
+                fail("sample " cur " implausible (" r ") and its THM registers are unusable (thm: " (thm == "" ? "none" : thm) ")")
+            } else {
+                jj = (tc + 0 > ctf + 0) ? tc + 0 : ctf + 0; ff = num(tf) ? tf + 0 : 0
+                if (jj < tmin || jj > tmax) fail("sample " cur " implausible (" r ") and its THM temperature " jj " C is too")
+                else { nr++; upd("j", jj); upd("f", ff); rules(jj, jj, ff) }
+            }
             cur = ""
         }
         /^thermal-watch start / { started = 1; t0 = $3; next }
         /^thermal-watch refused: / { fail($0); next }
         /^thermal-watch end / { close_sample(); ended = 1; t1 = $3; next }
-        /^sample [0-9]+ [0-9]+ rc / { close_sample(); cur = $2; rc = $5; bad = 0; got = 0; first = ""; n++; tl = $3; next }
+        /^sample [0-9]+ [0-9]+ rc / { close_sample(); cur = $2; rc = $5; first = ""; n++; tl = $3
+                                      rcl = ""; bang = 0; temps = 0; link = 0; thm = ""; e = j = fn = gen = wid = tc = ctf = tf = ""; next }
         cur == "" { next }
         first == "" && NF { first = $0 }
-        /range check: FAILED/ { bad = 1 }
+        /^!!.*range check: FAILED/ { bang = 1 }
+        /^range check: / { rcl = substr($0, 14) }
         /^temps / {
+            temps = 1
             for (i = 1; i <= NF; i++) {
                 if ($i == "edge") e = $(i + 1); if ($i == "hotspot") j = $(i + 1)
                 if ($i == "fan") fn = $(i + 1)
             }
-            if (rc != 0 || bad) next
-            got = 1; upd("j", j + 0); upd("e", e + 0); upd("f", fn + 0)
-            if (j + 0 > jmax) fail("junction " j " C > " jmax " C at sample " cur)
-            hot = (j + 0 > e + 0) ? j + 0 : e + 0
-            if (fn + 0 == 0 && hot > fmax) fail("fan 0 rpm at " hot " C at sample " cur)
+        }
+        /^link / { link = 1; for (i = 1; i < NF; i++) if ($i == "gen") { gen = $(i + 1); wid = $(i + 2); sub(/^x/, "", wid) } }
+        /^thm / {
+            thm = $0; sub(/^thm +/, "", thm); sub(/ +\(TCON_CUR_TMP.*/, "", thm)
+            for (i = 1; i < NF; i++) { if ($i == "tcon") tc = $(i + 1); if ($i == "ctf") ctf = $(i + 1); if ($i == "fan") tf = $(i + 1) }
         }
         END {
             close_sample()
@@ -517,8 +564,8 @@ crit_thermal_watch() {
             if (why == "" && !ended) why = "watch cut short after " n " samples"
             sum = ""
             if (("j", "n") in s)
-                sum = sprintf("%d samples over %d s: junction min/max/last %s C, edge %s C, fan %s rpm",
-                              n, (ended ? t1 : tl) - t0, mml("j"), mml("e"), mml("f"))
+                sum = sprintf("%d samples over %d s: junction min/max/last %s C, edge %s C, fan %s rpm; source: metrics %d%s",
+                              n, (ended ? t1 : tl) - t0, mml("j"), mml("e"), mml("f"), nm, nr ? ", registers " nr : "")
             if (why != "") print "FAIL " why (sum == "" ? "" : "; " sum)
             else print "PASS " sum
         }' "$f"

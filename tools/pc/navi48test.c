@@ -464,25 +464,92 @@ static int cmd_capstream(const char *path, int interval_ms, int max_s, const cha
     return 0;
 }
 
+// Ticket #18: navi48test's own range check, independent of the kext's (an older or broken kext must not be able
+// to vouch for a sample alone). Same bounds and NAVI48_METRICS_WHY_* bits as the kext's smu_metrics_check.h; the
+// bench of 2026-10-30 read edge 0 C, hotspot 0 C, PCIe gen 0 x0 and both checks used to call that "passed".
+static uint32_t metrics_tool_check(const struct Navi48Metrics *m) {
+    uint32_t why = 0;
+    if (!m->gfxclk_mhz && !m->socclk_mhz && !m->uclk_mhz && !m->fclk_mhz && !m->temp_edge_c && !m->temp_hotspot_c &&
+        !m->temp_mem_c && !m->socket_power_w && !m->board_power_w && !m->fan_rpm && !m->pcie_gen && !m->pcie_width &&
+        !m->metrics_counter)
+        why |= NAVI48_METRICS_WHY_TABLE_ZERO;
+    if (m->temp_edge_c < 5 || m->temp_hotspot_c < 5) why |= NAVI48_METRICS_WHY_TEMP_LOW;
+    if (m->temp_edge_c > 125 || m->temp_hotspot_c > 125) why |= NAVI48_METRICS_WHY_TEMP_HIGH;
+    if (m->temp_hotspot_c < m->temp_edge_c) why |= NAVI48_METRICS_WHY_HOT_BELOW_EDGE;
+    if (m->gfxclk_mhz > 4000 || m->uclk_mhz > 4000) why |= NAVI48_METRICS_WHY_CLOCK;
+    if (m->gfx_activity_pct > 100 || m->mem_activity_pct > 100) why |= NAVI48_METRICS_WHY_ACTIVITY;
+    if (m->pcie_gen < 1 || m->pcie_gen > 5 || m->pcie_width < 1 || m->pcie_width > 32) why |= NAVI48_METRICS_WHY_PCIE_LINK;
+    return why;
+}
+
+// "a, b, c" for a NAVI48_METRICS_WHY_* mask, into buf.
+static const char *metrics_why_names(uint32_t why, char *buf, size_t n) {
+    static const char *const names[] = {"table all zero", "table never written", "edge/hotspot below 5 C",
+        "edge/hotspot above 125 C", "hotspot below edge", "clock above 4000 MHz", "activity above 100%", "no live PCIe link"};
+    buf[0] = 0;
+    for (unsigned b = 0; b < 8; b++)
+        if (why & (1u << b)) snprintf(buf + strlen(buf), n - strlen(buf), "%s%s", buf[0] ? ", " : "", names[b]);
+    if (why >> 8) snprintf(buf + strlen(buf), n - strlen(buf), "%sbits 0x%x", buf[0] ? ", " : "", why >> 8);
+    return buf;
+}
+
+// Ticket #18: the THM registers (kNavi48SelThermalRegs), decoded the way older ASICs decode them. Upstream SMU 14.0.2
+// reads none of them, so the numbers are UNVERIFIED on Navi 44 - printed as a cross-check, never as the verdict.
+//   TCON_CUR_TMP: CUR_TEMP [31:21] in 1/8 C, CUR_TEMP_RANGE_SEL bit 19 = -49 C offset (smu10_hwmgr.c)
+//   CG_MULT_THERMAL_STATUS: CTF_TEMP [17:9] in C (vega20_thermal.c)
+//   CG_TACH_STATUS: TACH_PERIOD; rpm = 2500 (crystal, 10 kHz units) * 60 * 10000 / period (smu_v11_0.c)
+static void metrics_print_thm(void) {
+    struct Navi48ThermalRegs t; size_t sz = sizeof(t);
+    memset(&t, 0, sizeof(t));
+    kern_return_t kr = IOConnectCallStructMethod(conn, kNavi48SelThermalRegs, NULL, 0, &t, &sz);
+    if (kr != KERN_SUCCESS) { printf("thm     unavailable (ThermalRegs answered 0x%x; kext older than ticket #18?)\n", kr); return; }
+    if (!t.thm_present) { printf("thm     unavailable (IP discovery lists no THM block)\n"); return; }
+    if (t.tcon_cur_tmp == 0xFFFFFFFFu && t.cg_mult_thermal_status == 0xFFFFFFFFu) {
+        printf("thm     unavailable (registers read 0xffffffff)\n"); return;
+    }
+    int tcon = (int)((t.tcon_cur_tmp >> 21) & 0x7FFu) / 8;
+    if (t.tcon_cur_tmp & 0x80000u) tcon -= 49;
+    const unsigned ctf = (t.cg_mult_thermal_status >> 9) & 0x1FFu;
+    char fan[24];
+    if (t.cg_tach_status == 0 || t.cg_tach_status == 0xFFFFFFFFu) snprintf(fan, sizeof(fan), "?");
+    else snprintf(fan, sizeof(fan), "%llu", 2500ull * 60ull * 10000ull / t.cg_tach_status);
+    printf("thm     tcon %3d C  ctf %3u C  fan %s rpm  UNVERIFIED (TCON_CUR_TMP 0x%08x CG_MULT_THERMAL_STATUS 0x%08x CG_TACH_CTRL 0x%08x CG_TACH_STATUS 0x%08x)\n",
+           tcon, ctf, fan, t.tcon_cur_tmp, t.cg_mult_thermal_status, t.cg_tach_ctrl, t.cg_tach_status);
+}
+
 // Live telemetry. Repeats if asked, so you can watch clocks and temperature
 // move while something else drives the card.
+// Ticket #18: every sample ends with a "range check: passed|FAILED (...)" line (both the kext's check and this
+// tool's must pass) and a "thm" line with the THM registers; tools/acceptance crit_thermal_watch parses both.
 static int cmd_metrics(int repeat) {
     for (int i = 0; i < (repeat > 0 ? repeat : 1); i++) {
         struct Navi48Metrics m; size_t sz = sizeof(m);
+        memset(&m, 0, sizeof(m));
         kern_return_t kr = IOConnectCallStructMethod(conn, kNavi48SelMetrics, NULL, 0, &m, &sz);
         if (kr != KERN_SUCCESS) { fprintf(stderr, "Metrics failed 0x%x\n", kr); return 1; }
+        const uint32_t kwhy = m.values_plausible ? 0u : (m.implausible_why ? m.implausible_why : 0x80000000u);
+        const uint32_t twhy = metrics_tool_check(&m);
+        const int ok = kwhy == 0 && twhy == 0;
         if (!m.layout_verified)
             printf("!! firmware driver-interface version 0x%x is newer than the layout this\n"
                    "!! build decodes; values are UNVERIFIED (range check: %s)\n",
-                   m.if_version, m.values_plausible ? "passed" : "FAILED");
+                   m.if_version, ok ? "passed" : "FAILED");
         printf("clocks  gfx %4u MHz  soc %4u MHz  mem %4u MHz  fclk %4u MHz\n",
                m.gfxclk_mhz, m.socclk_mhz, m.uclk_mhz, m.fclk_mhz);
         printf("temps   edge %3u C  hotspot %3u C  mem %3u C   fan %u rpm (%u%%)\n",
                m.temp_edge_c, m.temp_hotspot_c, m.temp_mem_c, m.fan_rpm, m.fan_pwm_pct);
         printf("power   socket %3u W  board %3u W   busy gfx %3u%%  mem %3u%%\n",
                m.socket_power_w, m.board_power_w, m.gfx_activity_pct, m.mem_activity_pct);
-        printf("link    PCIe gen %u x%u   (snapshot %u)\n\n",
+        printf("link    PCIe gen %u x%u   (snapshot %u)\n",
                m.pcie_gen, m.pcie_width, m.metrics_counter);
+        char kb[256], tb[256], verdict[600];
+        if (ok) snprintf(verdict, sizeof(verdict), "passed");
+        else snprintf(verdict, sizeof(verdict), "FAILED (kext: %s; navi48test: %s)",
+                      kwhy == 0 ? "passed" : (kwhy == 0x80000000u ? "implausible, no reason given" : metrics_why_names(kwhy, kb, sizeof(kb))),
+                      twhy == 0 ? "passed" : metrics_why_names(twhy, tb, sizeof(tb)));
+        printf("range check: %s\n", verdict);
+        metrics_print_thm();
+        printf("\n");
         if (i + 1 < repeat) sleep(1);
     }
     return 0;

@@ -74,6 +74,7 @@ private:
 	IOReturn doCapConsume(IOExternalMethodArguments *args);    // 0.0.282
 	IOReturn doReadScanFull(IOExternalMethodArguments *args);  // build 0.0.542 (`accel scanout full`'s capture)
 	IOReturn doMetrics(IOExternalMethodArguments *args);
+	IOReturn doThermalRegs(IOExternalMethodArguments *args);   // ticket #18: THM registers, read-only
 	IOReturn doPowerState(IOExternalMethodArguments *args);
 	IOReturn doAccelExperiment(IOExternalMethodArguments *args);
 

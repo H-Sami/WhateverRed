@@ -74,6 +74,7 @@
 
 #include "amdgpu_smu.h"
 #include "amdgpu_log.h"
+#include "smu_metrics_check.h"   // ticket #18: the shared fail-closed plausibility check
 
 #include <kern/thread.h>          // current_thread(): the owner of the shared mailbox lock (0.0.604)
 #include <libkern/OSAtomic.h>
@@ -653,8 +654,61 @@ smu_smc_hw_setup(DeviceContext &dev, uint64_t driver_table_mc)
 // PMFW where the driver table is, nothing else. No feature, clock or
 // power message. Without it the SMU has no address to DMA a table to,
 // so smu_read_metrics (the read-only thermal verb) refuses until it ran.
-// Same fixed slot and zeroing as smc_hw_setup's step 2.
+// Same fixed slot as smc_hw_setup's step 2.
+//
+// Ticket #18 (bench 2026-10-30: every metrics sample read back all zero):
+// the slot is filled with kSMUDriverTableSentinel instead of zero and
+// HDP-flushed (upstream flushes HDP after every CPU write to VRAM the GPU
+// will read), then smu_driver_table_probe asks PMFW for one read-only table
+// so the log says whether PMFW's DMA reaches the slot at all.
 //============================================================
+
+// Count how the first `bytes` of the driver table read back, through the
+// MM_INDEX window (the GPU's view, not the CPU's BAR0 mapping).
+static void
+smu_driver_table_classify(const DeviceContext &dev, uint32_t bytes,
+                          uint32_t *zero, uint32_t *sentinel, uint32_t *other)
+{
+    *zero = *sentinel = *other = 0;
+    const uint64_t off = dev.vramBase + kSMUDriverTableVRAMOffset;
+    for (uint32_t i = 0; i < bytes / 4; i++) {
+        const uint32_t v = RVRAM32_via_mm(dev, off + i * 4);
+        if (v == 0) (*zero)++;
+        else if (v == kSMUDriverTableSentinel) (*sentinel)++;
+        else (*other)++;
+    }
+}
+
+// One TransferTableSmu2Dram(TABLE_COMBO_PPTABLE): the first table upstream
+// reads from PMFW (smu_v14_0_2_setup_pptable -> smu_cmn_get_combo_pptable),
+// before any feature is enabled, also under SCPM. SMU to DRAM only; the
+// table is the 16 KiB MP0_MP1_DATA_REGION_SIZE_COMBOPPTABLE, inside the slot.
+// Verdict in the log: "overwritten" = PMFW's DMA lands in the slot (a zero
+// metrics table is then PMFW's own content); "UNTOUCHED" = nothing landed
+// (address/aperture). The sentinel is restored afterwards so the first
+// metrics read starts from a known pattern.
+static void
+smu_driver_table_probe(const DeviceContext &dev)
+{
+    constexpr uint32_t kComboBytes = 0x4000;
+    const uint64_t off = dev.vramBase + kSMUDriverTableVRAMOffset;
+    uint32_t z0 = 0, s0 = 0, o0 = 0;
+    smu_driver_table_classify(dev, kComboBytes, &z0, &s0, &o0);
+    SMU_LOG("driver_table: before probe, first 16 KiB reads %u sentinel, %u zero, %u other dwords "
+            "(word0 0x%08x)", s0, z0, o0, RVRAM32_via_mm(dev, off));
+    const kern_return_t r = smu_transfer_table_smu_to_dram(dev, kSMUTableComboPPTable);
+    uint32_t z = 0, sn = 0, o = 0;
+    smu_driver_table_classify(dev, kComboBytes, &z, &sn, &o);
+    SMU_LOG("driver_table: probe TransferTableSmu2Dram(COMBO_PPTABLE=%u) kr=0x%x -> %u sentinel, %u zero, "
+            "%u other dwords; head %08x %08x %08x %08x -> %s", kSMUTableComboPPTable, (unsigned)r, sn, z, o,
+            RVRAM32_via_mm(dev, off), RVRAM32_via_mm(dev, off + 4), RVRAM32_via_mm(dev, off + 8),
+            RVRAM32_via_mm(dev, off + 12),
+            sn == kComboBytes / 4 ? "UNTOUCHED: PMFW's DMA did not reach this slot (address/aperture)"
+            : (o != 0 ? "overwritten with data: PMFW's DMA reaches the slot"
+                      : "overwritten with zeros: PMFW's DMA reaches the slot but the table is empty"));
+    bar0_memset_vram(dev, off, kSMUDriverTableSentinel, kSMUDriverTableSize);
+    amdgpu_hdp_flush(dev);
+}
 
 kern_return_t
 smu_set_driver_table_location(DeviceContext &dev)
@@ -665,8 +719,12 @@ smu_set_driver_table_location(DeviceContext &dev)
                 dev.vramMcBase, dev.vramBase, dev.vramLimit);
         return kIOReturnNoSpace;
     }
-    if (dev.bar0 != nullptr)
-        bar0_memset_vram(dev, dev.vramBase + kSMUDriverTableVRAMOffset, 0u, kSMUDriverTableSize);
+    if (dev.bar0 != nullptr) {
+        bar0_memset_vram(dev, dev.vramBase + kSMUDriverTableVRAMOffset, kSMUDriverTableSentinel, kSMUDriverTableSize);
+        amdgpu_hdp_flush(dev);
+        SMU_LOG("driver_table: slot filled with sentinel 0x%08x, HDP flushed; reads back 0x%08x via MM_INDEX",
+                kSMUDriverTableSentinel, RVRAM32_via_mm(dev, dev.vramBase + kSMUDriverTableVRAMOffset));
+    }
     const uint32_t hi = static_cast<uint32_t>(mc >> 32);
     const uint32_t lo = static_cast<uint32_t>(mc & 0xFFFFFFFFu);
     kern_return_t r = smu_send_msg_with_param(dev, PPSMC::SetDriverDramAddrHigh, hi, nullptr);
@@ -678,9 +736,11 @@ smu_set_driver_table_location(DeviceContext &dev)
         return r;
     }
     dev.smuDriverTable = true;
-    SMU_LOG("driver_table: SMU told the table is at mc=0x%llx (vram+0x%llx, zeroed); "
+    SMU_LOG("driver_table: SMU told the table is at mc=0x%llx (vram+0x%llx, sentinel-filled); "
             "no feature, clock or power state changed",
             mc, dev.vramBase + kSMUDriverTableVRAMOffset);
+    if (dev.bar0 != nullptr)
+        smu_driver_table_probe(dev);
     return kIOReturnSuccess;
 }
 
@@ -900,21 +960,32 @@ smu_read_metrics(const DeviceContext &dev, SmuMetricsResult *out)
     // are not trusting a stale CPU mapping of the aperture.
     const uint64_t off = dev.vramBase + kSMUDriverTableVRAMOffset;
     auto *dst = reinterpret_cast<uint32_t *>(&out->metrics);
-    for (uint32_t i = 0; i < sizeof(SmuMetrics) / 4; i++)
+    bool table_zero = true, table_untouched = true;
+    for (uint32_t i = 0; i < sizeof(SmuMetrics) / 4; i++) {
         dst[i] = RVRAM32_via_mm(dev, off + i * 4);
+        table_zero = table_zero && dst[i] == 0;
+        table_untouched = table_untouched && dst[i] == kSMUDriverTableSentinel;
+    }
 
-    // Plausibility: a Navi 48 at idle or load should sit inside these ranges.
-    // This is the only defence when the layout is unverified — it catches a
-    // wholesale offset shift, though not a subtle one.
+    // Plausibility (ticket #18: fail closed). A powered Navi 44 at idle or
+    // load sits inside these ranges, both ways: the bench of 2026-10-30 read
+    // an all-zero table that the old upper-bounds-only check passed. This is
+    // the only defence when the layout is unverified - it catches an empty
+    // table and a wholesale offset shift, though not a subtle one.
     const SmuMetrics &m = out->metrics;
-    const uint32_t gfx = m.CurrClock[SMUClk::GFXCLK];
-    const uint32_t mem = m.CurrClock[SMUClk::UCLK];
-    const uint32_t edge = m.AvgTemperature[SMUTemp::EDGE];
-    const uint32_t hot  = m.AvgTemperature[SMUTemp::HOTSPOT];
-    out->values_plausible =
-        gfx <= 4000 && mem <= 4000 &&
-        edge <= 125 && hot <= 125 && hot >= edge &&
-        m.AverageGfxActivity <= 100 && m.AverageUclkActivity <= 100;
+    SmuMetricsSample s {};
+    s.gfx_mhz = m.CurrClock[SMUClk::GFXCLK];
+    s.mem_mhz = m.CurrClock[SMUClk::UCLK];
+    s.edge_c = m.AvgTemperature[SMUTemp::EDGE];
+    s.hotspot_c = m.AvgTemperature[SMUTemp::HOTSPOT];
+    s.gfx_busy_pct = m.AverageGfxActivity;
+    s.mem_busy_pct = m.AverageUclkActivity;
+    s.pcie_gen = m.PcieRate;
+    s.pcie_width = m.PcieWidth;
+    s.table_zero = table_zero;
+    s.table_untouched = table_untouched;
+    out->implausible_why = smu_metrics_implausible(s);
+    out->values_plausible = (out->implausible_why == 0);
     return kIOReturnSuccess;
 }
 
@@ -927,9 +998,17 @@ smu_log_metrics(const SmuMetricsResult &res)
                 "is the %#x one (upstream pins that for SMU 14.0.2 and 14.0.3). The "
                 "firmware is newer than any published header, so treat the decode "
                 "below as UNVERIFIED: offset-0 fields are probably right, deeper "
-                "ones may have shifted. Plausibility check: %s.",
-                res.if_version, kSMUDriverIfVersion_14_0_2,
-                res.values_plausible ? "passed" : "FAILED");
+                "ones may have shifted.",
+                res.if_version, kSMUDriverIfVersion_14_0_2);
+    }
+    // Ticket #18: the verdict on every sample, with its reasons.
+    if (res.values_plausible) {
+        SMU_LOG("metrics: Plausibility check: passed");
+    } else {
+        SMU_LOG("metrics: Plausibility check: FAILED (why 0x%02x) - these numbers are not a temperature",
+                res.implausible_why);
+        for (uint32_t b = 1; b <= NAVI48_METRICS_WHY_PCIE_LINK; b <<= 1)
+            if (res.implausible_why & b) SMU_LOG("metrics:   implausible: %s", smu_metrics_why_name(b));
     }
     SMU_LOG("metrics: gfx %u MHz, soc %u MHz, mem %u MHz, fclk %u MHz (counter %u)",
             m.CurrClock[SMUClk::GFXCLK], m.CurrClock[SMUClk::SOCCLK],

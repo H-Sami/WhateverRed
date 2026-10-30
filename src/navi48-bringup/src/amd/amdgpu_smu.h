@@ -301,6 +301,7 @@ kern_return_t smu_set_power_state(const DeviceContext &dev, uint32_t state);
 // the card reports a different interface version, every field below is at
 // the wrong offset and the numbers are nonsense — so smu_read_metrics
 // checks the version first and refuses rather than reporting garbage.
+constexpr uint32_t kSMUTableComboPPTable   = 1;      // TABLE_COMBO_PPTABLE (ticket #18 probe, SMU->DRAM only)
 constexpr uint32_t kSMUTableMetrics        = 5;      // TABLE_SMU_METRICS
 constexpr uint32_t kSMUDriverIfVersion_14_0_2 = 0x2E;
 constexpr uint32_t kSMUPpClkCount   = 11;   // PPCLK_COUNT
@@ -386,7 +387,8 @@ struct SmuMetricsResult {
     SmuMetrics metrics;
     uint32_t   if_version;        // what PMFW reported
     bool       layout_verified;   // if_version == kSMUDriverIfVersion_14_0_2
-    bool       values_plausible;  // clocks/temps inside sane ranges
+    bool       values_plausible;  // implausible_why == 0
+    uint32_t   implausible_why;   // ticket #18: NAVI48_METRICS_WHY_* bits (smu_metrics_check.h)
 };
 
 // Ask PMFW for a fresh snapshot and copy it out of the driver table.

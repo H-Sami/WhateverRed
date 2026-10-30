@@ -16,6 +16,18 @@
 //       clock or power message - and smc_hw_setup's own SetDriverDramAddr marks the table too;
 //   T4  the dispatch maps selector 11 to doMetrics, and navi48test's `metrics` prints the lines the harness
 //       thermal watch parses (tools/acceptance/lib.sh crit_thermal_watch).
+//   T5  fail closed (bench 2026-10-30: an all-zero table passed the old upper-bound-only check): the kext's
+//       plausibility check (amd/smu_metrics_check.h, run here on the host) rejects an all-zero or never-written
+//       table, edge / hotspot below 5 C, and a PCIe link of gen 0 / x0; smu_read_metrics uses it on every sample
+//       and the verb hands the reasons out; navi48test runs its own range check and prints the verdict line.
+//   T6  the driver table is filled with a sentinel and HDP-flushed before PMFW is told where it is, and one
+//       read-only TransferTableSmu2Dram(TABLE_COMBO_PPTABLE) - the transfer upstream smu_smc_hw_setup sends
+//       before any metrics read (smu_setup_pptable -> smu_cmn_get_combo_pptable) - shows whether PMFW writes
+//       the slot at all; the slot is re-filled after. Still no feature, clock or power message.
+//   T7  the THM register verb (selector 19) only reads: IP discovery's THM block (hw id 3), four registers at
+//       the thm_14_0_2_offset.h offsets, no register write, no SMU message; navi48test's `metrics` (the only verb
+//       the sudo rule allows) calls only the Metrics and ThermalRegs selectors.
+#include "../src/amd/smu_metrics_check.h"
 #include <cctype>
 #include <cstdio>
 #include <string>
@@ -98,7 +110,7 @@ int main(int argc, char **argv) {
     expect(!rm.empty(), "T1 smu_read_metrics found");
     bad.clear();
     expect(only_calls(rm, {"smu_get_driver_if_version", "SMU_LOG", "smu_driver_table_mc", "smu_transfer_table_smu_to_dram",
-                           "reinterpret_cast<uint32_t *>", "sizeof", "RVRAM32_via_mm"}, &bad),
+                           "reinterpret_cast<uint32_t *>", "sizeof", "RVRAM32_via_mm", "smu_metrics_implausible"}, &bad),
            ("T1 smu_read_metrics sends only the two queries and reads VRAM through RVRAM32_via_mm (found " + bad + ")").c_str());
     expect(has(rm, "smu_transfer_table_smu_to_dram(dev, kSMUTableMetrics)"), "T1 the one transfer is TABLE_SMU_METRICS, SMU to DRAM");
     const std::string tt = body(smu, "smu_transfer_table_smu_to_dram(const DeviceContext &dev, uint32_t table_id)");
@@ -138,6 +150,123 @@ int main(int argc, char **argv) {
     expect(has(tool, "\"temps   edge %3u C  hotspot %3u C  mem %3u C   fan %u rpm (%u%%)\\n\""), "T4 navi48test metrics prints the temps line crit_thermal_watch parses");
     expect(has(tool, "values are UNVERIFIED (range check: %s)"), "T4 navi48test metrics prints the range-check verdict crit_thermal_watch reads");
     expect(has(suites, "run thermal_verb "), "T4 the host suite runs this test");
+
+    // T5: fail closed. The pure check first, on the samples that matter.
+    using amdgpu::SmuMetricsSample;
+    using amdgpu::smu_metrics_implausible;
+    const SmuMetricsSample idle {200, 96, 35, 37, 0, 0, 4, 16, false, false};
+    expect(smu_metrics_implausible(idle) == 0, "T5 a 35/37 C idle at PCIe gen 4 x16 is plausible");
+    const SmuMetricsSample bench {0, 0, 0, 0, 0, 0, 0, 0, true, false};   // 2026-10-30, kext 36EA2F95: every field 0
+    const uint32_t bw = smu_metrics_implausible(bench);
+    expect(bw != 0, "T5 the bench's all-zero sample is implausible");
+    expect((bw & NAVI48_METRICS_WHY_TABLE_ZERO) && (bw & NAVI48_METRICS_WHY_TEMP_LOW) && (bw & NAVI48_METRICS_WHY_PCIE_LINK),
+           "T5 ... for three independent reasons: zero table, temps below 5 C, no PCIe link");
+    SmuMetricsSample s = idle; s.table_zero = true;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_TABLE_ZERO, "T5 a zero table alone is enough");
+    s = idle; s.table_untouched = true;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_UNTOUCHED, "T5 a never-written (sentinel) table alone is enough");
+    s = idle; s.edge_c = 4;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_TEMP_LOW, "T5 edge 4 C is implausible");
+    s = idle; s.edge_c = 5; s.hotspot_c = 5;
+    expect(smu_metrics_implausible(s) == 0, "T5 edge and hotspot of exactly 5 C pass");
+    s = idle; s.hotspot_c = 0; s.edge_c = 0;
+    expect(smu_metrics_implausible(s) & NAVI48_METRICS_WHY_TEMP_LOW, "T5 hotspot 0 C is implausible even when the rest looks alive");
+    s = idle; s.hotspot_c = 126;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_TEMP_HIGH, "T5 hotspot 126 C is implausible");
+    s = idle; s.hotspot_c = 125;
+    expect(smu_metrics_implausible(s) == 0, "T5 hotspot 125 C passes the plausibility check (the watch's 95 C limit is separate)");
+    s = idle; s.hotspot_c = 30;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_HOT_BELOW_EDGE, "T5 hotspot below edge is implausible");
+    s = idle; s.pcie_gen = 0;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_PCIE_LINK, "T5 PCIe gen 0 is implausible");
+    s = idle; s.pcie_width = 0;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_PCIE_LINK, "T5 PCIe x0 is implausible");
+    s = idle; s.pcie_gen = 6;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_PCIE_LINK, "T5 PCIe gen 6 is implausible (LINK_SPEED_MAX 5)");
+    s = idle; s.pcie_gen = 1; s.pcie_width = 1;
+    expect(smu_metrics_implausible(s) == 0, "T5 PCIe gen 1 x1 passes");
+    s = idle; s.gfx_mhz = 4001;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_CLOCK, "T5 a 4001 MHz clock is implausible");
+    s = idle; s.mem_busy_pct = 101;
+    expect(smu_metrics_implausible(s) == NAVI48_METRICS_WHY_ACTIVITY, "T5 101 % activity is implausible");
+    // A table PMFW never wrote decodes to the sentinel's halves: implausible however the fields fall.
+    const uint32_t sh = amdgpu::kSMUDriverTableSentinel & 0xFFFFu, sl = amdgpu::kSMUDriverTableSentinel >> 16;
+    const SmuMetricsSample sent {amdgpu::kSMUDriverTableSentinel, amdgpu::kSMUDriverTableSentinel, sh, sl, sh, sl,
+                                 amdgpu::kSMUDriverTableSentinel & 0xFFu, (amdgpu::kSMUDriverTableSentinel >> 8) & 0xFFu, false, true};
+    expect(smu_metrics_implausible(sent) & NAVI48_METRICS_WHY_UNTOUCHED, "T5 a sentinel table is flagged as never written");
+    for (uint32_t b = 1; b <= NAVI48_METRICS_WHY_PCIE_LINK; b <<= 1)
+        expect(std::string(amdgpu::smu_metrics_why_name(b)) != "?", "T5 every reason bit has a log name");
+
+    // ... and the kext and tool use it.
+    const std::string rmc = code_only(rm);
+    expect(has(rmc, "smu_metrics_implausible(") && has(rmc, "out->values_plausible = (out->implausible_why == 0)"),
+           "T5 smu_read_metrics' verdict is exactly the shared check (no other path to 'plausible')");
+    expect(has(rmc, "kSMUDriverTableSentinel") && has(rmc, "table_zero") && has(rmc, "table_untouched"),
+           "T5 smu_read_metrics classifies the raw table (all zero / never written) before decoding");
+    expect(has(smu, "#include \"smu_metrics_check.h\""), "T5 smu_v14_0.cpp uses the shared check");
+    expect(has(code_only(doM), "out.implausible_why") && has(code_only(doM), "res.implausible_why"), "T5 the verb hands the reasons out");
+    const std::string cm = body(tool, "static int cmd_metrics(int repeat)");
+    expect(!cm.empty(), "T5 navi48test cmd_metrics found");
+    expect(has(tool, "\"range check: %s\"") || has(tool, "printf(\"range check: "), "T5 navi48test prints a range-check verdict line on every sample");
+    expect(has(cm, "metrics_tool_check("), "T5 navi48test runs its own range check, not only the kext's");
+    const std::string tc = body(tool, "static uint32_t metrics_tool_check(");
+    expect(has(tc, "< 5") && has(tc, "pcie_gen") && has(tc, "pcie_width") && has(tc, "temp_hotspot_c") && has(tc, "temp_edge_c"),
+           "T5 navi48test's check covers low temps and the PCIe link");
+
+    // T6: the driver table is sentinel-filled, HDP-flushed, and probed with one read-only transfer.
+    const std::string locc = code_only(loc);
+    expect(has(locc, "bar0_memset_vram(dev, dev.vramBase + kSMUDriverTableVRAMOffset, kSMUDriverTableSentinel, kSMUDriverTableSize)"),
+           "T6 smu_set_driver_table_location fills the slot with the sentinel");
+    const size_t fill = locc.find("bar0_memset_vram("), flush = locc.find("amdgpu_hdp_flush(dev)"), tell = locc.find("PPSMC::SetDriverDramAddrHigh");
+    expect(fill != std::string::npos && flush != std::string::npos && fill < flush && flush < tell,
+           "T6 ... and HDP-flushes it before telling PMFW where it is");
+    expect(has(locc, "smu_driver_table_probe(dev)") && locc.find("smu_driver_table_probe(dev)") > locc.find("dev.smuDriverTable = true"),
+           "T6 the probe runs only once the table is placed");
+    const std::string pr = body(smu, "smu_driver_table_probe(const DeviceContext &dev)");
+    expect(!pr.empty(), "T6 smu_driver_table_probe found");
+    bad.clear();
+    expect(only_calls(pr, {"smu_transfer_table_smu_to_dram", "RVRAM32_via_mm", "bar0_memset_vram", "amdgpu_hdp_flush", "SMU_LOG",
+                           "smu_driver_table_classify"}, &bad),
+           ("T6 the probe only transfers SMU->DRAM, reads, re-fills and flushes (found " + bad + ")").c_str());
+    expect(has(pr, "smu_transfer_table_smu_to_dram(dev, kSMUTableComboPPTable)") && count_of(pr, "smu_transfer_table_smu_to_dram(") == 1,
+           "T6 the probe's one transfer is TABLE_COMBO_PPTABLE, SMU to DRAM");
+    expect(has(smu, "constexpr uint32_t kSMUTableComboPPTable = 1;") || has(slurp(K + "src/amd/amdgpu_smu.h"), "constexpr uint32_t kSMUTableComboPPTable   = 1;"),
+           "T6 TABLE_COMBO_PPTABLE is 1 (smu14_driver_if_v14_0.h)");
+    const size_t xfer = pr.find("smu_transfer_table_smu_to_dram("), refill = pr.rfind("bar0_memset_vram(");
+    expect(refill != std::string::npos && xfer < refill && pr.rfind("amdgpu_hdp_flush(dev)") > refill,
+           "T6 the probe re-fills the sentinel and flushes after the transfer, so the first metrics read starts clean");
+    for (const char *m : {"TransferTableDram2Smu", "smu_transfer_table_dram_to_smu", "smu_send_msg"})
+        expect(!has(code_only(pr), m), (std::string("T6 the probe sends no ") + m).c_str());
+
+    // T7: the THM register verb only reads.
+    expect(has(abi, "kNavi48SelThermalRegs     = 19,") && has(abi, "struct Navi48ThermalRegs"), "T7 selector 19 and its struct are in the ABI");
+    expect(has(uc, "case kNavi48SelThermalRegs:") && has(uc, "return doThermalRegs(args);"), "T7 selector 19 dispatches to doThermalRegs");
+    const std::string tr = body(uc, "IOReturn Navi48UserClient::doThermalRegs(");
+    expect(!tr.empty(), "T7 doThermalRegs found");
+    bad.clear();
+    expect(only_calls(tr, {"sizeof", "ipDisc", "findIp", "regReadIp", "memcpy"}, &bad),
+           ("T7 doThermalRegs only looks THM up and reads registers (found " + bad + ")").c_str());
+    for (const char *off : {"kThmTconCurTmp = 0x00", "kThmCgMultThermalStatus = 0x0f", "kThmCgTachCtrl = 0x14", "kThmCgTachStatus = 0x15"})
+        expect(has(uc, off), (std::string("T7 THM offset from thm_14_0_2_offset.h: ") + off).c_str());
+    expect(has(slurp(K + "src/ipdiscovery.hpp"), "HwThm    = 3,"), "T7 THM is discovery hw id 3 (soc15_hw_ip.h THM_HWID)");
+    expect(count_of(code_only(tr), "regReadIp(IpDiscovery::HwThm, 0, 0, ") == 4, "T7 four reads, all from THM instance 0 segment 0");
+    const std::string bri = slurp(K + "src/Navi48Bringup.cpp");
+    const std::string rri = body(bri, "uint32_t Navi48Bringup::regReadIp(uint16_t hwId, uint8_t inst, uint8_t seg, uint32_t dword)");
+    const std::string rr32 = body(bri, "uint32_t Navi48Bringup::regRead32(uint32_t byteOffset) const");
+    expect(has(rri, "return regRead32(off);") && !has(rri, "regWrite") && !has(rri, "= v") , "T7 regReadIp only reads");
+    expect(has(rr32, "return rmmio[byteOffset / 4];") && count_of(rr32, "=") == 0, "T7 regRead32 is a bare MMIO load");
+    bad.clear();
+    const std::string thm = body(tool, "static void metrics_print_thm(void)");
+    expect(!thm.empty() && has(cm, "metrics_print_thm();"), "T7 navi48test metrics prints the THM registers on every sample");
+    const std::vector<std::string> sels = [&] { std::vector<std::string> v; const std::string c = code_only(cm + thm);
+        for (size_t p = 0; (p = c.find("kNavi48Sel", p)) != std::string::npos; ) { size_t e = p; while (e < c.size() && (isalnum((unsigned char)c[e]) || c[e] == '_')) e++; v.push_back(c.substr(p, e - p)); p = e; }
+        return v; }();
+    bool onlyRead = !sels.empty();
+    for (const std::string &x : sels) if (x != "kNavi48SelMetrics" && x != "kNavi48SelThermalRegs") { onlyRead = false; bad = x; }
+    expect(onlyRead, ("T7 navi48test metrics calls only the Metrics and ThermalRegs selectors (found " + bad + ")").c_str());
+    expect(has(thm, "kNavi48SelThermalRegs"), "T7 navi48test metrics reads the THM registers too");
+    expect(has(tool, "\"thm     tcon %3d C  ctf %3u C  fan %s rpm  UNVERIFIED (TCON_CUR_TMP 0x%08x CG_MULT_THERMAL_STATUS 0x%08x CG_TACH_CTRL 0x%08x CG_TACH_STATUS 0x%08x)\\n\""),
+           "T7 navi48test prints the thm line crit_thermal_watch parses, marked UNVERIFIED with the raw registers");
 
     std::printf("thermal_verb: %d checks, %d failed\n", gRun, gFail);
     return gFail ? 1 : 0;

@@ -31,6 +31,7 @@ public:
 	// Hardware IP ids (Linux soc15_hw_ip.h) we care about.
 	enum HwId : uint16_t {
 		HwMp1    = 1,
+		HwThm    = 3,     // thermal block (THM_HWID); ticket #18 reads its temperature and tach registers only
 		HwGc     = 11,
 		HwMmhub  = 34,
 		HwOsssys = 40,

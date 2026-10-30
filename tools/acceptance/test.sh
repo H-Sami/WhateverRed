@@ -404,14 +404,22 @@ check "the thermal watch defaults to 600 s at stage 9" "600" "$(thermal_watch_de
 check "the thermal watch is off at stage 1" "0" "$(thermal_watch_default 1)"
 
 # watch_sample <n> <epoch> <edge> <junction> <fan> [passed|FAILED]: one sample as the collector writes it
-# (`navi48test metrics` output; the "!!" lines only when the kext calls the layout unverified)
+# (`navi48test metrics` output; the "!!" lines only when the kext calls the layout unverified). Knobs, set
+# before watch_file and reset after: WS_LINK (the link line's "gen x width", "-" = no link line), WS_RANGE
+# (the range-check line's verdict, "-" = no range-check line; default the 6th argument, else passed), WS_THM
+# (the thm line, without "thm     "; "-" = none).
+WS_LINK="4 x16"; WS_RANGE=""; WS_THM="unavailable (IP discovery lists no THM block)"
+ws_reset() { WS_LINK="4 x16"; WS_RANGE=""; WS_THM="unavailable (IP discovery lists no THM block)"; }
 watch_sample() {
+    local r="${WS_RANGE:-${6:-passed}}"
     echo "sample $1 $2 rc 0"
     [ -z "${6:-}" ] || printf '!! firmware driver-interface version 0x33 is newer than the layout this\n!! build decodes; values are UNVERIFIED (range check: %s)\n' "$6"
     echo "clocks  gfx  200 MHz  soc  500 MHz  mem   96 MHz  fclk  400 MHz"
     printf 'temps   edge %3u C  hotspot %3u C  mem  40 C   fan %u rpm (0%%)\n' "$3" "$4" "$5"
     echo "power   socket   9 W  board  14 W   busy gfx   0%  mem   0%"
-    echo "link    PCIe gen 4 x16   (snapshot $1)"
+    [ "$WS_LINK" = "-" ] || echo "link    PCIe gen $WS_LINK   (snapshot $1)"
+    case "$r" in -) ;; FAILED) echo "range check: FAILED (kext: edge/hotspot above 125 C; navi48test: edge/hotspot above 125 C)" ;; *) echo "range check: $r" ;; esac
+    [ "$WS_THM" = "-" ] || echo "thm     $WS_THM"
     echo
 }
 watch_file() {   # stdin: one "edge junction fan [passed|FAILED]" line per sample; writes a finished watch
@@ -422,7 +430,7 @@ watch_file() {   # stdin: one "edge junction fan [passed|FAILED]" line per sampl
 }
 printf '35 37 0\n36 39 0\n35 38 0\n' | watch_file > "$W/thermal-watch.txt"
 check "thermal-watch passes a zero-RPM idle at 37-39 C and prints min/max/last" \
-    "PASS 3 samples over 30 s: junction min/max/last 37/39/38 C, edge 35/36/35 C, fan 0/0/0 rpm" "$(evaluate_criterion thermal-watch "$W")"
+    "PASS 3 samples over 30 s: junction min/max/last 37/39/38 C, edge 35/36/35 C, fan 0/0/0 rpm; source: metrics 3" "$(evaluate_criterion thermal-watch "$W")"
 printf '60 70 1200\n70 96 1800\n65 80 1500\n' | watch_file > "$W/thermal-watch.txt"
 check_match "thermal-watch fails on a junction above 95 C" "^FAIL junction 96 C > 95 C at sample 2; 3 samples over 30 s: junction min/max/last 70/96/80 C" "$(evaluate_criterion thermal-watch "$W")"
 printf '60 70 1200\n70 95 1800\n' | watch_file > "$W/thermal-watch.txt"
@@ -436,7 +444,74 @@ check_match "thermal-watch passes a spinning fan above 60 C" "^PASS 1 samples" "
 printf '35 37 0 passed\n36 38 0 passed\n' | watch_file > "$W/thermal-watch.txt"
 check_match "thermal-watch accepts unverified-layout samples whose range check passed" "^PASS 2 samples" "$(evaluate_criterion thermal-watch "$W")"
 printf '35 37 0 passed\n255 12 0 FAILED\n' | watch_file > "$W/thermal-watch.txt"
-check_match "thermal-watch fails on samples the kext calls implausible" "^FAIL sample 2 implausible" "$(evaluate_criterion thermal-watch "$W")"
+check_match "thermal-watch fails on samples the kext calls implausible" "^FAIL sample 2 implausible \(range check FAILED\)" "$(evaluate_criterion thermal-watch "$W")"
+
+# ticket #18, fail closed (bench 2026-10-30, kext 36EA2F95: an all-zero metrics table that the kext and
+# navi48test both called "passed", and the watch would have passed). The bench's own capture, verbatim:
+BENCH_ZERO='!! firmware driver-interface version 0x33 is newer than the layout this
+!! build decodes; values are UNVERIFIED (range check: passed)
+clocks  gfx    0 MHz  soc    0 MHz  mem    0 MHz  fclk    0 MHz
+temps   edge   0 C  hotspot   0 C  mem   0 C   fan 0 rpm (0%)
+power   socket   0 W  board   0 W   busy gfx   0%  mem   0%
+link    PCIe gen 0 x0   (snapshot 0)'
+{ echo "thermal-watch start 1793359276 period 10 duration 20"
+  for i in 1 2 3; do echo "sample $i $((1793359276 + 10 * (i - 1))) rc 0"; printf '%s\n' "$BENCH_ZERO"; done
+  echo "thermal-watch end 1793359306"; } > "$W/thermal-watch.txt"
+check_match "thermal-watch fails the bench's all-zero samples (old tool, no range-check line)" "^FAIL sample 1 implausible \(no range-check line\); no trusted register source" "$(evaluate_criterion thermal-watch "$W")"
+{ echo "thermal-watch start 1793359276 period 10 duration 20"
+  for i in 1 2 3; do echo "sample $i $((1793359276 + 10 * (i - 1))) rc 0"; printf '%s\nrange check: passed\n' "$BENCH_ZERO"; done
+  echo "thermal-watch end 1793359306"; } > "$W/thermal-watch.txt"
+check_match "thermal-watch fails all-zero samples even when the tool says the range check passed" "^FAIL sample 1 implausible \(edge 0 C / junction 0 C below 5 C\)" "$(evaluate_criterion thermal-watch "$W")"
+check_match "... and says it has no temperature, not a min/max" "no temperature \(thm: none\)$" "$(evaluate_criterion thermal-watch "$W")"
+printf '4 37 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch fails an edge of 4 C" "^FAIL sample 1 implausible \(edge 4 C / junction 37 C below 5 C\)" "$(evaluate_criterion thermal-watch "$W")"
+printf '35 4 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch fails a junction of 4 C" "^FAIL sample 1 implausible \(edge 35 C / junction 4 C below 5 C\)" "$(evaluate_criterion thermal-watch "$W")"
+printf '5 5 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch passes edge and junction of exactly 5 C" "^PASS 1 samples" "$(evaluate_criterion thermal-watch "$W")"
+printf '35 126 900\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch fails a junction above 125 C as implausible" "^FAIL sample 1 implausible \(edge 35 C / junction 126 C above 125 C\)" "$(evaluate_criterion thermal-watch "$W")"
+WS_LINK="0 x0"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch fails PCIe gen 0 x0 (no live link)" "^FAIL sample 1 implausible \(PCIe gen 0 x0 is no live link\)" "$(evaluate_criterion thermal-watch "$W")"
+WS_LINK="4 x0"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch fails a zero link width" "^FAIL sample 1 implausible \(PCIe gen 4 x0 is no live link\)" "$(evaluate_criterion thermal-watch "$W")"
+WS_LINK="6 x16"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch fails PCIe gen 6" "^FAIL sample 1 implausible \(PCIe gen 6 x16" "$(evaluate_criterion thermal-watch "$W")"
+WS_LINK="1 x1"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch passes PCIe gen 1 x1" "^PASS 1 samples" "$(evaluate_criterion thermal-watch "$W")"
+WS_LINK="-"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch fails a sample with no link line" "^FAIL sample 1 implausible \(no link line\)" "$(evaluate_criterion thermal-watch "$W")"
+WS_RANGE="-"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch fails a sample with no range-check line" "^FAIL sample 1 implausible \(no range-check line\)" "$(evaluate_criterion thermal-watch "$W")"
+WS_RANGE="FAILED"; printf '35 37 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "thermal-watch fails a sample whose range-check line FAILED, and says why" "^FAIL sample 1 implausible \(range check FAILED \(kext: edge/hotspot above 125 C" "$(evaluate_criterion thermal-watch "$W")"
+printf '35 37 0\n36 39 0\n0 0 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "one zero sample after good ones fails the watch, with the good samples summarised" "^FAIL sample 3 implausible .*; 3 samples over 30 s: junction min/max/last 37/39/39 C, edge 35/36/36 C, fan 0/0/0 rpm; source: metrics 2$" "$(evaluate_criterion thermal-watch "$W")"
+
+# the THM register fallback: shown, never trusted while THERMAL_REG_TRUSTED=0 (upstream SMU 14.0.2 reads none of it)
+check "the THM registers are not a trusted source on SMU 14.0.2" "0" "$THERMAL_REG_TRUSTED"
+THM_OK='tcon  38 C  ctf  38 C  fan 1200 rpm  UNVERIFIED (TCON_CUR_TMP 0x04c00000 CG_MULT_THERMAL_STATUS 0x00004c00 CG_TACH_CTRL 0x00000002 CG_TACH_STATUS 0x00004e20)'
+WS_THM="$THM_OK"; printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "untrusted THM registers do not rescue an all-zero sample, and the verdict shows them" "^FAIL sample 1 implausible \(edge 0 C / junction 0 C below 5 C\); no trusted register source on SMU 14.0.2, so no temperature \(thm: tcon  38 C  ctf  38 C  fan 1200 rpm  UNVERIFIED\)$" "$(evaluate_criterion thermal-watch "$W")"
+saved_trust=$THERMAL_REG_TRUSTED; THERMAL_REG_TRUSTED=1
+WS_THM="$THM_OK"; printf '0 0 0\n0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check "trusted THM registers stand in for implausible metrics, and the verdict says so" \
+    "PASS 2 samples over 20 s: junction min/max/last 38/38/38 C, edge n/a C, fan 1200/1200/1200 rpm; source: metrics 0, registers 2" "$(evaluate_criterion thermal-watch "$W")"
+WS_THM="$THM_OK"; printf '35 37 0\n0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "plausible metrics win over the registers, sample by sample" "^PASS 2 samples .*; source: metrics 1, registers 1$" "$(evaluate_criterion thermal-watch "$W")"
+WS_THM='tcon  96 C  ctf  90 C  fan 1800 rpm  UNVERIFIED (x)'; printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "the junction limit applies to the register temperature" "^FAIL junction 96 C > 95 C at sample 1; .*source: metrics 0, registers 1$" "$(evaluate_criterion thermal-watch "$W")"
+WS_THM='tcon  61 C  ctf  55 C  fan ? rpm  UNVERIFIED (x)'; printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "an unreadable tach counts as a stopped fan above 60 C" "^FAIL fan 0 rpm at 61 C at sample 1; " "$(evaluate_criterion thermal-watch "$W")"
+WS_THM='tcon  61 C  ctf  55 C  fan 0 rpm  UNVERIFIED (x)'; printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "a stopped register fan above 60 C fails" "^FAIL fan 0 rpm at 61 C at sample 1; " "$(evaluate_criterion thermal-watch "$W")"
+printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "trusted but unavailable THM registers fail closed" "^FAIL sample 1 implausible \(edge 0 C / junction 0 C below 5 C\) and its THM registers are unusable \(thm: unavailable \(IP discovery lists no THM block\)\)$" "$(evaluate_criterion thermal-watch "$W")"
+WS_THM='tcon -49 C  ctf   0 C  fan ? rpm  UNVERIFIED (x)'; printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "an impossible register temperature fails closed too" "^FAIL sample 1 implausible .* and its THM registers are unusable" "$(evaluate_criterion thermal-watch "$W")"
+WS_THM='tcon   0 C  ctf   0 C  fan ? rpm  UNVERIFIED (x)'; printf '0 0 0\n' | watch_file > "$W/thermal-watch.txt"; ws_reset
+check_match "a zero register temperature fails closed" "^FAIL sample 1 implausible .* and its THM temperature 0 C is too" "$(evaluate_criterion thermal-watch "$W")"
+THERMAL_REG_TRUSTED=$saved_trust
 rm -f "$W/thermal-watch.txt"
 check_match "thermal-watch fails when nothing was collected" "^FAIL thermal watch not collected" "$(evaluate_criterion thermal-watch "$W")"
 echo "thermal-watch start 1000 period 10 duration 600" > "$W/thermal-watch.txt"
@@ -453,13 +528,17 @@ cat > "$TMP/fake-metrics" <<'FAKE'
 #!/bin/sh
 echo "clocks  gfx  200 MHz  soc  500 MHz  mem   96 MHz  fclk  400 MHz"
 echo "temps   edge  35 C  hotspot  37 C  mem  40 C   fan 0 rpm (0%)"
+echo "power   socket   9 W  board  14 W   busy gfx   0%  mem   0%"
+echo "link    PCIe gen 4 x16   (snapshot 7)"
+echo "range check: passed"
+echo "thm     unavailable (IP discovery lists no THM block)"
 FAKE
 printf '#!/bin/sh\necho "sudo: a password is required" >&2\nexit 1\n' > "$TMP/fake-refused"
 printf '#!/bin/sh\necho "Metrics failed 0xe00002d8" >&2\nexit 1\n' > "$TMP/fake-broken"
 chmod +x "$TMP/fake-metrics" "$TMP/fake-refused" "$TMP/fake-broken"
 check_match "the watch samples the fixed navi48test path under sudo -n" "^sudo -n /opt/whateverred/navi48test metrics$" "$THERMAL_SAMPLE_CMD"
 sh -c "$(thermal_watch_script 0 0 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
-check_match "a zero-length watch takes one sample and finishes" "^PASS 1 samples over [0-9]+ s: junction min/max/last 37/37/37 C, edge 35/35/35 C, fan 0/0/0 rpm" "$(evaluate_criterion thermal-watch "$W")"
+check_match "a zero-length watch takes one sample and finishes" "^PASS 1 samples over [0-9]+ s: junction min/max/last 37/37/37 C, edge 35/35/35 C, fan 0/0/0 rpm; source: metrics 1$" "$(evaluate_criterion thermal-watch "$W")"
 sh -c "$(thermal_watch_script 2 1 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
 check_match "a 2 s watch at 1 s takes at least 3 samples" "^PASS ([3-9]|[1-9][0-9]+) samples" "$(evaluate_criterion thermal-watch "$W")"
 sh -c "$(thermal_watch_script 600 10 "$TMP/fake-refused")" > "$W/thermal-watch.txt"

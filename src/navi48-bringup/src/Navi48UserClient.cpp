@@ -480,6 +480,7 @@ IOReturn Navi48UserClient::doMetrics(IOExternalMethodArguments *args) {
 	out.if_version      = res.if_version;
 	out.layout_verified = res.layout_verified ? 1u : 0u;
 	out.values_plausible = res.values_plausible ? 1u : 0u;
+	out.implausible_why  = res.implausible_why;   // ticket #18: why it is not a temperature (0 when plausible)
 	out.gfxclk_mhz       = m.CurrClock[amdgpu::SMUClk::GFXCLK];
 	out.socclk_mhz       = m.CurrClock[amdgpu::SMUClk::SOCCLK];
 	out.uclk_mhz         = m.CurrClock[amdgpu::SMUClk::UCLK];
@@ -496,6 +497,32 @@ IOReturn Navi48UserClient::doMetrics(IOExternalMethodArguments *args) {
 	out.pcie_gen         = m.PcieRate;
 	out.pcie_width       = m.PcieWidth;
 	out.metrics_counter  = m.MetricsCounter;
+	memcpy(args->structureOutput, &out, sizeof(out));
+	args->structureOutputSize = sizeof(out);
+	return kIOReturnSuccess;
+}
+
+// Ticket #18: the THM block's temperature and fan-tach registers, as they stand. Pure MMIO reads through IP
+// discovery (hw id 3, instance 0, segment 0); no write, no SMU message, no dependency on the metrics table or DPM.
+// Offsets: Linux include/asic_reg/thm/thm_14_0_2_offset.h (all BASE_IDX 0). Upstream SMU 14.0.2 never reads these
+// (temperatures and fan come from the metrics table), so the decode is unverified on Navi 44: a cross-check only.
+static constexpr uint32_t kThmTconCurTmp = 0x00;            // regTHM_TCON_CUR_TMP
+static constexpr uint32_t kThmCgMultThermalStatus = 0x0f;   // regCG_MULT_THERMAL_STATUS
+static constexpr uint32_t kThmCgTachCtrl = 0x14;            // regCG_TACH_CTRL
+static constexpr uint32_t kThmCgTachStatus = 0x15;          // regCG_TACH_STATUS
+
+IOReturn Navi48UserClient::doThermalRegs(IOExternalMethodArguments *args) {
+	if (!args->structureOutput || args->structureOutputSize < sizeof(Navi48ThermalRegs))
+		return kIOReturnBadArgument;
+	Navi48ThermalRegs out {};
+	IpDiscovery::IpEntry thm {};
+	if (owner->ipDisc().findIp(IpDiscovery::HwThm, 0, thm) && thm.numBases > 0) {
+		out.thm_present            = 1;
+		out.tcon_cur_tmp           = owner->regReadIp(IpDiscovery::HwThm, 0, 0, kThmTconCurTmp);
+		out.cg_mult_thermal_status = owner->regReadIp(IpDiscovery::HwThm, 0, 0, kThmCgMultThermalStatus);
+		out.cg_tach_ctrl           = owner->regReadIp(IpDiscovery::HwThm, 0, 0, kThmCgTachCtrl);
+		out.cg_tach_status         = owner->regReadIp(IpDiscovery::HwThm, 0, 0, kThmCgTachStatus);
+	}
 	memcpy(args->structureOutput, &out, sizeof(out));
 	args->structureOutputSize = sizeof(out);
 	return kIOReturnSuccess;
@@ -637,6 +664,7 @@ IOReturn Navi48UserClient::externalMethod(uint32_t selector,
 	case kNavi48SelCapConsume:  return doCapConsume(args);
 	case kNavi48SelReadScanFull: return doReadScanFull(args);   // build 0.0.542 (`scanout full`)
 	case kNavi48SelMetrics:     return doMetrics(args);
+	case kNavi48SelThermalRegs: return doThermalRegs(args);
 	case kNavi48SelPowerState:  return doPowerState(args);
 	case kNavi48SelAccelExperiment: return doAccelExperiment(args);
 	default: break;
