@@ -245,6 +245,11 @@ kern_return_t smu_smc_hw_setup(DeviceContext &dev,
 // the reference's SMUInit stage.
 kern_return_t smu_hw_init(DeviceContext &dev, bool runSmcHwSetup);
 
+// [ADDED, ticket #18] SetDriverDramAddrHigh/Low for the fixed driver-table
+// slot only (upstream smu_v14_0_set_driver_table_location); sets
+// dev.smuDriverTable. smu_hw_init calls it when smc_hw_setup is skipped.
+kern_return_t smu_set_driver_table_location(DeviceContext &dev);
+
 // [ADDED here] Feature control + clock clamps. These live in the
 // reference's user-client (dext/MacAMDGPU.cpp, selectors 33 and 40)
 // rather than in smu_v14_0.cpp; this kext has no user client, so the

@@ -40,14 +40,15 @@ static std::string body(const std::string &s, const std::string &head) {
     }
     return "";
 }
-// Every identifier in `s` that is followed by "(" (a call or a macro use), in order.
+// Every identifier in `s` that is followed by "(" (a call or a macro use; not a keyword), in order.
 static std::vector<std::string> calls(const std::string &s) {
     std::vector<std::string> out;
     for (size_t i = 0; i < s.size(); i++) {
         if (s[i] != '(') continue;
         size_t e = i; while (e > 0 && s[e - 1] == ' ') e--;
         size_t b = e; while (b > 0 && (isalnum((unsigned char)s[b - 1]) || s[b - 1] == '_' || s[b - 1] == ':')) b--;
-        if (b < e) out.push_back(s.substr(b, e - b));
+        const std::string id = s.substr(b, e - b);
+        if (b < e && id != "if" && id != "for" && id != "while" && id != "switch" && id != "return") out.push_back(id);
     }
     return out;
 }

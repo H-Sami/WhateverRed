@@ -502,6 +502,7 @@ smu_smc_hw_setup(DeviceContext &dev, uint64_t driver_table_mc)
             return r;
         }
         SMU_LOG("smc_hw_setup: SetDriverDramAddr ok (hi=0x%x lo=0x%x)", hi, lo);
+        dev.smuDriverTable = (driver_table_mc == smu_driver_table_mc(dev));
     }
 
     // 3.5 v0.1.29 — UseDefaultPPTable. The full pptable-from-VBIOS
@@ -646,6 +647,43 @@ smu_smc_hw_setup(DeviceContext &dev, uint64_t driver_table_mc)
 // power-state-changing part and is gated by the caller.
 //============================================================
 
+//============================================================
+// [ADDED, ticket #18] smu_set_driver_table_location — upstream
+// smu_v14_0_set_driver_table_location (smu_v14_0.c), on its own: tell
+// PMFW where the driver table is, nothing else. No feature, clock or
+// power message. Without it the SMU has no address to DMA a table to,
+// so smu_read_metrics (the read-only thermal verb) refuses until it ran.
+// Same fixed slot and zeroing as smc_hw_setup's step 2.
+//============================================================
+
+kern_return_t
+smu_set_driver_table_location(DeviceContext &dev)
+{
+    const uint64_t mc = smu_driver_table_mc(dev);
+    if (mc == 0) {
+        SMU_LOG("driver_table: no VRAM slot (mcBase=0x%llx base=0x%llx limit=0x%llx)",
+                dev.vramMcBase, dev.vramBase, dev.vramLimit);
+        return kIOReturnNoSpace;
+    }
+    if (dev.bar0 != nullptr)
+        bar0_memset_vram(dev, dev.vramBase + kSMUDriverTableVRAMOffset, 0u, kSMUDriverTableSize);
+    const uint32_t hi = static_cast<uint32_t>(mc >> 32);
+    const uint32_t lo = static_cast<uint32_t>(mc & 0xFFFFFFFFu);
+    kern_return_t r = smu_send_msg_with_param(dev, PPSMC::SetDriverDramAddrHigh, hi, nullptr);
+    if (r == kIOReturnSuccess)
+        r = smu_send_msg_with_param(dev, PPSMC::SetDriverDramAddrLow, lo, nullptr);
+    if (r != kIOReturnSuccess) {
+        SMU_LOG("driver_table: SetDriverDramAddr(hi=0x%x lo=0x%x) FAILED kr=0x%x — "
+                "telemetry stays unavailable", hi, lo, (unsigned)r);
+        return r;
+    }
+    dev.smuDriverTable = true;
+    SMU_LOG("driver_table: SMU told the table is at mc=0x%llx (vram+0x%llx, zeroed); "
+            "no feature, clock or power state changed",
+            mc, dev.vramBase + kSMUDriverTableVRAMOffset);
+    return kIOReturnSuccess;
+}
+
 kern_return_t
 smu_hw_init(DeviceContext &dev, bool runSmcHwSetup)
 {
@@ -670,6 +708,9 @@ smu_hw_init(DeviceContext &dev, bool runSmcHwSetup)
     SMU_LOG("hw_init: SMU online (pmfw 0x%08x, if 0x%08x)", ver, ifver);
 
     if (!runSmcHwSetup) {
+        // Ticket #18: the driver table address alone, so the thermal
+        // verb can read the metrics table. Non-fatal like smc_hw_setup.
+        (void)smu_set_driver_table_location(dev);
         SMU_LOG("hw_init: smc_hw_setup skipped by caller — no clock/power "
                 "state was changed");
         return kIOReturnSuccess;
@@ -826,6 +867,14 @@ smu_read_metrics(const DeviceContext &dev, SmuMetricsResult *out)
 {
     if (out == nullptr) return kIOReturnBadArgument;
     *out = SmuMetricsResult{};
+    // Ticket #18: never ask PMFW to DMA a table it has no address for
+    // (stage 9 skips smc_hw_setup; smu_set_driver_table_location covers it).
+    if (!dev.smuOnline || !dev.smuDriverTable) {
+        SMU_LOG("read_metrics: refused — SMU %s, driver table %s",
+                dev.smuOnline ? "online" : "not online",
+                dev.smuDriverTable ? "placed" : "not placed");
+        return kIOReturnNotReady;
+    }
 
     kern_return_t r = smu_get_driver_if_version(dev, &out->if_version);
     if (r != kIOReturnSuccess) {

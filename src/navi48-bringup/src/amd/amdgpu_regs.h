@@ -52,6 +52,7 @@ struct DeviceContext {
     // --- state flags kept for API compatibility with the reference ---
     bool psoCAlive { false };   // (sic) SOS alive
     bool smuOnline { false };
+    bool smuDriverTable { false };   // ticket #18: the SMU was told the driver table's address (SetDriverDramAddr) and it is the fixed slot smu_read_metrics reads
     bool gmcReady  { false };
     DoorbellState doorbell {};   // BAR2 doorbell map (amdgpu_ip.h), filled by the doorbell module
 
