@@ -425,12 +425,17 @@ thermal_watch_default() {   # thermal_watch_default <stage>: the watch length in
     if [ "$1" -ge "$SMU_ONLINE_STAGE" ] 2>/dev/null; then echo "$THERMAL_WATCH_SECONDS"; else echo 0; fi
 }
 
-# The watch's sampler: tools/pc/navi48test, which accept.sh's preflight builds on the bench at this fixed
-# path, run as root (the user client is root-only) through a passwordless sudo rule that names this path
-# and the `metrics` verb only (thermal_sudoers_rule; /etc/sudoers.d/whateverred-metrics, installed by the
-# owner). `metrics` is the read-only Metrics verb (selector 11; tests/thermal_verb_test.cpp pins it).
-THERMAL_TOOL=/Users/pc/navi-stage/acceptance/navi48test
+# The watch's sampler: tools/pc/navi48test. accept.sh's preflight builds it on the bench at THERMAL_BUILD
+# (pc-writable), but sudo runs only the owner-installed copy at THERMAL_TOOL: root:wheel, mode 755, in a
+# root-owned directory, so pc cannot swap the binary that runs as root. The preflight refuses unless that
+# copy is byte-identical to the fresh build (thermal_install_cmd prints the owner's install command).
+# The user client is root-only; the passwordless sudo rule names THERMAL_TOOL and the `metrics` verb only
+# (thermal_sudoers_rule; /etc/sudoers.d/whateverred-metrics). `metrics` is the read-only Metrics verb
+# (selector 11; tests/thermal_verb_test.cpp pins it).
+THERMAL_BUILD=/Users/pc/navi-stage/acceptance/navi48test
+THERMAL_TOOL=/opt/whateverred/navi48test
 THERMAL_SAMPLE_CMD="sudo -n $THERMAL_TOOL metrics"
+thermal_install_cmd() { echo "sudo install -d -o root -g wheel -m 755 ${THERMAL_TOOL%/*} && sudo install -o root -g wheel -m 755 $THERMAL_BUILD $THERMAL_TOOL"; }
 thermal_sudoers_rule() { echo "pc ALL=(root) NOPASSWD: $THERMAL_TOOL metrics"; }
 # thermal_watch_script <duration s> <period s> <sample command>: the sh script the collector runs on the
 # bench (one SSH session). One sample at once, then one every <period> s until <duration> s have passed;

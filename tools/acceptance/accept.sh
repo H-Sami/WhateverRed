@@ -17,7 +17,8 @@
 #     --expect-preset NAME  a named set of the above, from lib.sh expect_preset (navi44-stage1, navi44-stage9)
 #     --settle S            seconds between the load and the collection (default 20)
 #     --thermal-watch S     after the collection, sample junction/edge/fan for S s (default 600 at --stage >= 9,
-#                           0 = off; off below 9). Needs /etc/sudoers.d/whateverred-metrics (lib.sh). Stage >= 9
+#                           0 = off; off below 9). Needs the owner-installed root copy of navi48test and
+#                           /etc/sudoers.d/whateverred-metrics (lib.sh THERMAL_TOOL). Stage >= 9
 #                           also adds idle-clamp: a log line "idle clamp: ... FAILED" (or none) fails the run
 #     --force-cycle         run even when the preflight finds the kext missing or the chown not allowed
 #                           (kext-loaded then FAILs)
@@ -187,14 +188,23 @@ rsh "mkdir -p ~/$REMOTE_DIR" && scp -q "$HERE/fbread.c" "$HOST:$REMOTE_DIR/fbrea
     && rsh "cd ~/$REMOTE_DIR && clang -O2 -Wall -framework IOKit -framework CoreFoundation fbread.c -o fbread" \
     || { echo "could not build fbread on $HOST" >&2; exit 2; }
 
-# The thermal watch's sampler: build tools/pc/navi48test on the bench at THERMAL_TOOL (sources copied into
-# ~/REMOTE_DIR/navi48test-src) and check sudo -n may run `THERMAL_TOOL metrics` (the kext answers NotReady
-# while nothing is armed; only a sudo refusal matters here).
+# The thermal watch's sampler: build tools/pc/navi48test on the bench at THERMAL_BUILD (sources copied into
+# ~/REMOTE_DIR/navi48test-src), require the owner-installed root copy THERMAL_TOOL to be root:wheel 755 in a
+# root:wheel 755 directory and byte-identical to that build, and check sudo -n may run `THERMAL_TOOL metrics`
+# (the kext answers NotReady while nothing is armed; only a sudo refusal matters here).
 if [ "$WATCH" -gt 0 ]; then
     msg=""
-    [ "$(rsh 'echo $HOME')/$REMOTE_DIR/navi48test" = "$THERMAL_TOOL" ] || msg="$THERMAL_TOOL is not ~/$REMOTE_DIR/navi48test on $HOST (lib.sh THERMAL_TOOL)"
-    [ -n "$msg" ] || (cd "$REPO" && tar cf - tools/pc/navi48test.c $(cd "$REPO" && find src/navi48-bringup/src -name '*.h'))         | rsh "rm -rf ~/$REMOTE_DIR/navi48test-src && mkdir -p ~/$REMOTE_DIR/navi48test-src && tar xf - -C ~/$REMOTE_DIR/navi48test-src                && clang -O2 -Wall -I ~/$REMOTE_DIR/navi48test-src/src/navi48-bringup/src/apple -framework IOKit -framework CoreFoundation                     ~/$REMOTE_DIR/navi48test-src/tools/pc/navi48test.c -o $THERMAL_TOOL" > "${TMPDIR:-/tmp}/navi48test-build.$$" 2>&1         || msg="could not build navi48test on $HOST: $(grep -m 1 -i error "${TMPDIR:-/tmp}/navi48test-build.$$")"
+    [ "$(rsh 'echo $HOME')/$REMOTE_DIR/navi48test" = "$THERMAL_BUILD" ] || msg="$THERMAL_BUILD is not ~/$REMOTE_DIR/navi48test on $HOST (lib.sh THERMAL_BUILD)"
+    [ -n "$msg" ] || (cd "$REPO" && tar cf - tools/pc/navi48test.c $(cd "$REPO" && find src/navi48-bringup/src -name '*.h'))         | rsh "rm -rf ~/$REMOTE_DIR/navi48test-src && mkdir -p ~/$REMOTE_DIR/navi48test-src && tar xf - -C ~/$REMOTE_DIR/navi48test-src                && clang -O2 -Wall -I ~/$REMOTE_DIR/navi48test-src/src/navi48-bringup/src/apple -framework IOKit -framework CoreFoundation                     ~/$REMOTE_DIR/navi48test-src/tools/pc/navi48test.c -o $THERMAL_BUILD" > "${TMPDIR:-/tmp}/navi48test-build.$$" 2>&1         || msg="could not build navi48test on $HOST: $(grep -m 1 -i error "${TMPDIR:-/tmp}/navi48test-build.$$")"
     rm -f "${TMPDIR:-/tmp}/navi48test-build.$$"
+    if [ -z "$msg" ]; then
+        own="$(rsh "stat -f '%Su:%Sg %Lp' ${THERMAL_TOOL%/*} $THERMAL_TOOL 2>/dev/null | tr '\n' ' '")"
+        if [ "$own" != "root:wheel 755 root:wheel 755 " ]; then
+            msg="$THERMAL_TOOL and its directory must be root:wheel 755 (found: ${own:-missing}); the owner installs it: $(thermal_install_cmd)"
+        elif ! rsh "cmp -s $THERMAL_BUILD $THERMAL_TOOL"; then
+            msg="$THERMAL_TOOL differs from this checkout's navi48test build; the owner reinstalls it: $(thermal_install_cmd)"
+        fi
+    fi
     if [ -z "$msg" ]; then
         case "$(rsh "$THERMAL_SAMPLE_CMD" 2>&1 | head -n 1)" in "sudo: "*)
             msg="sudo -n may not run $THERMAL_TOOL metrics (install /etc/sudoers.d/whateverred-metrics: $(thermal_sudoers_rule))" ;; esac

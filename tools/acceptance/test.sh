@@ -457,7 +457,7 @@ FAKE
 printf '#!/bin/sh\necho "sudo: a password is required" >&2\nexit 1\n' > "$TMP/fake-refused"
 printf '#!/bin/sh\necho "Metrics failed 0xe00002d8" >&2\nexit 1\n' > "$TMP/fake-broken"
 chmod +x "$TMP/fake-metrics" "$TMP/fake-refused" "$TMP/fake-broken"
-check_match "the watch samples the fixed navi48test path under sudo -n" "sudo -n /Users/pc/navi-stage/acceptance/navi48test metrics" "$THERMAL_SAMPLE_CMD"
+check_match "the watch samples the fixed navi48test path under sudo -n" "^sudo -n /opt/whateverred/navi48test metrics$" "$THERMAL_SAMPLE_CMD"
 sh -c "$(thermal_watch_script 0 0 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
 check_match "a zero-length watch takes one sample and finishes" "^PASS 1 samples over [0-9]+ s: junction min/max/last 37/37/37 C, edge 35/35/35 C, fan 0/0/0 rpm" "$(evaluate_criterion thermal-watch "$W")"
 sh -c "$(thermal_watch_script 2 1 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
@@ -467,7 +467,9 @@ check_match "the watch stops at once when sudo refuses, and says why" "^FAIL the
 sh -c "$(thermal_watch_script 0 0 "$TMP/fake-broken")" > "$W/thermal-watch.txt"
 check_match "a sample the kext refuses fails the watch" "^FAIL sample 1 failed \(rc 1\): Metrics failed 0xe00002d8" "$(evaluate_criterion thermal-watch "$W")"
 check_match "the sudoers rule names the fixed path and only the metrics verb" \
-    "^pc ALL=\(root\) NOPASSWD: /Users/pc/navi-stage/acceptance/navi48test metrics$" "$(thermal_sudoers_rule)"
+    "^pc ALL=\(root\) NOPASSWD: /opt/whateverred/navi48test metrics$" "$(thermal_sudoers_rule)"
+check_match "the owner's install puts a root:wheel 755 copy of the pc-built sampler in a root-owned directory"     "^sudo install -d -o root -g wheel -m 755 /opt/whateverred && sudo install -o root -g wheel -m 755 /Users/pc/navi-stage/acceptance/navi48test /opt/whateverred/navi48test$" "$(thermal_install_cmd)"
+check "sudo never runs the pc-writable build" "" "$(case "$THERMAL_TOOL" in "$THERMAL_BUILD"|/Users/*) echo writable ;; esac)"
 
 printf '%d passed, %d failed\n' "$passes" "$fails"
 [ "$fails" -eq 0 ]
