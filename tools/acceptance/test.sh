@@ -540,7 +540,7 @@ check_match "the watch samples the fixed navi48test path under sudo -n" "^sudo -
 sh -c "$(thermal_watch_script 0 0 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
 check_match "a zero-length watch takes one sample and finishes" "^PASS 1 samples over [0-9]+ s: junction min/max/last 37/37/37 C, edge 35/35/35 C, fan 0/0/0 rpm; source: metrics 1$" "$(evaluate_criterion thermal-watch "$W")"
 sh -c "$(thermal_watch_script 2 1 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
-check_match "a 2 s watch at 1 s takes at least 3 samples" "^PASS ([3-9]|[1-9][0-9]+) samples" "$(evaluate_criterion thermal-watch "$W")"
+check_match "a 2 s watch at 1 s takes more than one sample (2 or 3: date +%s has whole-second resolution)" "^PASS ([2-9]|[1-9][0-9]+) samples" "$(evaluate_criterion thermal-watch "$W")"
 sh -c "$(thermal_watch_script 600 10 "$TMP/fake-refused")" > "$W/thermal-watch.txt"
 check_match "the watch stops at once when sudo refuses, and says why" "^FAIL thermal-watch refused: sudo: a password is required" "$(evaluate_criterion thermal-watch "$W")"
 sh -c "$(thermal_watch_script 0 0 "$TMP/fake-broken")" > "$W/thermal-watch.txt"
@@ -548,7 +548,7 @@ check_match "a sample the kext refuses fails the watch" "^FAIL sample 1 failed \
 check_match "the sudoers rule names the fixed path and only the metrics verb" \
     "^pc ALL=\(root\) NOPASSWD: /opt/whateverred/navi48test metrics$" "$(thermal_sudoers_rule)"
 check_match "the owner's install puts a root:wheel 755 copy of the pc-built sampler in a root-owned directory"     "^sudo install -d -o root -g wheel -m 755 /opt/whateverred && sudo install -o root -g wheel -m 755 /Users/pc/navi-stage/acceptance/navi48test /opt/whateverred/navi48test$" "$(thermal_install_cmd)"
-check "sudo never runs the pc-writable build" "" "$(case "$THERMAL_TOOL" in "$THERMAL_BUILD"|/Users/*) echo writable ;; esac)"
+check "sudo never runs the pc-writable build" "" "$(case "$THERMAL_TOOL" in ("$THERMAL_BUILD"|/Users/*) echo writable ;; esac)"
 
 printf '%d passed, %d failed\n' "$passes" "$fails"
 [ "$fails" -eq 0 ]

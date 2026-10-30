@@ -699,13 +699,13 @@ smu_driver_table_probe(const DeviceContext &dev)
     const kern_return_t r = smu_transfer_table_smu_to_dram(dev, kSMUTableComboPPTable);
     uint32_t z = 0, sn = 0, o = 0;
     smu_driver_table_classify(dev, kComboBytes, &z, &sn, &o);
+    const char *verdict = "overwritten with zeros: PMFW's DMA reaches the slot but the table is empty";
+    if (o != 0) verdict = "overwritten with data: PMFW's DMA reaches the slot";
+    if (sn == kComboBytes / 4) verdict = "UNTOUCHED: PMFW's DMA did not reach this slot (address/aperture)";
     SMU_LOG("driver_table: probe TransferTableSmu2Dram(COMBO_PPTABLE=%u) kr=0x%x -> %u sentinel, %u zero, "
             "%u other dwords; head %08x %08x %08x %08x -> %s", kSMUTableComboPPTable, (unsigned)r, sn, z, o,
             RVRAM32_via_mm(dev, off), RVRAM32_via_mm(dev, off + 4), RVRAM32_via_mm(dev, off + 8),
-            RVRAM32_via_mm(dev, off + 12),
-            sn == kComboBytes / 4 ? "UNTOUCHED: PMFW's DMA did not reach this slot (address/aperture)"
-            : (o != 0 ? "overwritten with data: PMFW's DMA reaches the slot"
-                      : "overwritten with zeros: PMFW's DMA reaches the slot but the table is empty"));
+            RVRAM32_via_mm(dev, off + 12), verdict);
     bar0_memset_vram(dev, off, kSMUDriverTableSentinel, kSMUDriverTableSize);
     amdgpu_hdp_flush(dev);
 }
