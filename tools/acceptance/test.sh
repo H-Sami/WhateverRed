@@ -381,5 +381,93 @@ check "boot_log_lines writes nothing (no read marker) when the boot UUID was not
 printf '%s\n' "$CUR" | boot_log_lines > /dev/null; check "boot_log_lines succeeds on a boot with no lines" 0 $?
 printf '\n' | boot_log_lines > /dev/null; check "boot_log_lines fails without a boot UUID" 1 $?
 
+# --- ticket #18: the idle clamp and the thermal watch --------------------------------------------------
+W="$TMP/watch"; mkdir -p "$W"
+CLAMP_FAILED='22:10:04 init: idle clamp: GFXCLK -> low FAILED (0xe00002bc) — the GFX core is powered but ungated, so an unclamped idle burns full board power. `navi48test power 0` to unclamp.'
+CLAMP_OK='22:10:04 init: idle clamp: GFXCLK -> low applied (0) — the GFX core is powered but ungated, so an unclamped idle burns full board power. `navi48test power 0` to unclamp.'
+printf '%s\n%s\n' "$S9LOG" "$CLAMP_FAILED" > "$W/log.txt"
+check_match "idle-clamp fails a run whose log shows the clamp FAILED" "^FAIL .*idle clamp: GFXCLK -> low FAILED \(0xe00002bc\)" "$(evaluate_criterion idle-clamp "$W")"
+printf '%s\n%s\n' "$S9LOG" "$CLAMP_OK" > "$W/log.txt"
+check_match "idle-clamp passes when the clamp was applied" "^PASS .*idle clamp: GFXCLK -> low applied" "$(evaluate_criterion idle-clamp "$W")"
+printf '%s\n' "$S9LOG" > "$W/log.txt"
+check_match "idle-clamp fails when the log has no idle clamp line (unclamped, no record)" "^FAIL no 'idle clamp:' line" "$(evaluate_criterion idle-clamp "$W")"
+printf '%s\n%s\n%s\n' "$S9LOG" "$CLAMP_OK" "$(printf '%s' "$CLAMP_FAILED" | sed 's/22:10:04/22:10:09/')" > "$W/log.txt"
+check_match "idle-clamp fails when any clamp line FAILED, even after an applied one" "^FAIL .*FAILED" "$(evaluate_criterion idle-clamp "$W")"
+
+check "stage 1 adds no automatic criteria" "" "$(stage_criteria 1)"
+check "stage 8 adds no automatic criteria (the SMU is not online yet)" "" "$(stage_criteria 8)"
+check "stage 9 adds the idle clamp and the thermal watch" "idle-clamp
+thermal-watch" "$(stage_criteria 9)"
+check "stage 17 adds them too" "idle-clamp
+thermal-watch" "$(stage_criteria 17)"
+check "the thermal watch defaults to 600 s at stage 9" "600" "$(thermal_watch_default 9)"
+check "the thermal watch is off at stage 1" "0" "$(thermal_watch_default 1)"
+
+# watch_sample <n> <epoch> <edge> <junction> <fan> [passed|FAILED]: one sample as the collector writes it
+# (`navi48test metrics` output; the "!!" lines only when the kext calls the layout unverified)
+watch_sample() {
+    echo "sample $1 $2 rc 0"
+    [ -z "${6:-}" ] || printf '!! firmware driver-interface version 0x33 is newer than the layout this\n!! build decodes; values are UNVERIFIED (range check: %s)\n' "$6"
+    echo "clocks  gfx  200 MHz  soc  500 MHz  mem   96 MHz  fclk  400 MHz"
+    printf 'temps   edge %3u C  hotspot %3u C  mem  40 C   fan %u rpm (0%%)\n' "$3" "$4" "$5"
+    echo "power   socket   9 W  board  14 W   busy gfx   0%  mem   0%"
+    echo "link    PCIe gen 4 x16   (snapshot $1)"
+    echo
+}
+watch_file() {   # stdin: one "edge junction fan [passed|FAILED]" line per sample; writes a finished watch
+    local i=0 e j f p
+    echo "thermal-watch start 1000 period 10 duration 20"
+    while read -r e j f p; do i=$((i + 1)); watch_sample "$i" $((1000 + 10 * (i - 1))) "$e" "$j" "$f" "$p"; done
+    echo "thermal-watch end $((1000 + 10 * i))"
+}
+printf '35 37 0\n36 39 0\n35 38 0\n' | watch_file > "$W/thermal-watch.txt"
+check "thermal-watch passes a zero-RPM idle at 37-39 C and prints min/max/last" \
+    "PASS 3 samples over 30 s: junction min/max/last 37/39/38 C, edge 35/36/35 C, fan 0/0/0 rpm" "$(evaluate_criterion thermal-watch "$W")"
+printf '60 70 1200\n70 96 1800\n65 80 1500\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch fails on a junction above 95 C" "^FAIL junction 96 C > 95 C at sample 2; 3 samples over 30 s: junction min/max/last 70/96/80 C" "$(evaluate_criterion thermal-watch "$W")"
+printf '60 70 1200\n70 95 1800\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch passes a junction of exactly 95 C" "^PASS 2 samples" "$(evaluate_criterion thermal-watch "$W")"
+printf '40 45 0\n55 61 0\n50 55 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch fails on a stopped fan above 60 C" "^FAIL fan 0 rpm at 61 C at sample 2; " "$(evaluate_criterion thermal-watch "$W")"
+printf '40 45 0\n55 60 0\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch passes a stopped fan at exactly 60 C" "^PASS 2 samples" "$(evaluate_criterion thermal-watch "$W")"
+printf '40 61 900\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch passes a spinning fan above 60 C" "^PASS 1 samples" "$(evaluate_criterion thermal-watch "$W")"
+printf '35 37 0 passed\n36 38 0 passed\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch accepts unverified-layout samples whose range check passed" "^PASS 2 samples" "$(evaluate_criterion thermal-watch "$W")"
+printf '35 37 0 passed\n255 12 0 FAILED\n' | watch_file > "$W/thermal-watch.txt"
+check_match "thermal-watch fails on samples the kext calls implausible" "^FAIL sample 2 implausible" "$(evaluate_criterion thermal-watch "$W")"
+rm -f "$W/thermal-watch.txt"
+check_match "thermal-watch fails when nothing was collected" "^FAIL thermal watch not collected" "$(evaluate_criterion thermal-watch "$W")"
+echo "thermal-watch start 1000 period 10 duration 600" > "$W/thermal-watch.txt"
+check_match "thermal-watch fails with no samples" "^FAIL no samples" "$(evaluate_criterion thermal-watch "$W")"
+{ echo "thermal-watch start 1000 period 10 duration 600"; echo "sample 1 1000 rc 1"; echo "Metrics failed 0xe00002d8"; echo "thermal-watch end 1600"; } > "$W/thermal-watch.txt"
+check_match "thermal-watch fails when a sample could not be read" "^FAIL sample 1 failed \(rc 1\): Metrics failed 0xe00002d8" "$(evaluate_criterion thermal-watch "$W")"
+printf '35 37 0\n36 39 0\n' | watch_file | grep -v '^thermal-watch end' > "$W/thermal-watch.txt"
+check_match "thermal-watch fails a watch cut short (no end line)" "^FAIL watch cut short after 2 samples" "$(evaluate_criterion thermal-watch "$W")"
+{ echo "thermal-watch start 1000 period 10 duration 600"; echo "thermal-watch refused: sudo -n may not run /x/navi48test metrics"; } > "$W/thermal-watch.txt"
+check_match "thermal-watch reports why the collector refused" "^FAIL thermal-watch refused: sudo -n may not run" "$(evaluate_criterion thermal-watch "$W")"
+
+# the collector's remote script, run here against a fake `navi48test metrics`
+cat > "$TMP/fake-metrics" <<'FAKE'
+#!/bin/sh
+echo "clocks  gfx  200 MHz  soc  500 MHz  mem   96 MHz  fclk  400 MHz"
+echo "temps   edge  35 C  hotspot  37 C  mem  40 C   fan 0 rpm (0%)"
+FAKE
+printf '#!/bin/sh\necho "sudo: a password is required" >&2\nexit 1\n' > "$TMP/fake-refused"
+printf '#!/bin/sh\necho "Metrics failed 0xe00002d8" >&2\nexit 1\n' > "$TMP/fake-broken"
+chmod +x "$TMP/fake-metrics" "$TMP/fake-refused" "$TMP/fake-broken"
+check_match "the watch samples the fixed navi48test path under sudo -n" "sudo -n /Users/pc/navi-stage/acceptance/navi48test metrics" "$THERMAL_SAMPLE_CMD"
+sh -c "$(thermal_watch_script 0 0 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
+check_match "a zero-length watch takes one sample and finishes" "^PASS 1 samples over [0-9]+ s: junction min/max/last 37/37/37 C, edge 35/35/35 C, fan 0/0/0 rpm" "$(evaluate_criterion thermal-watch "$W")"
+sh -c "$(thermal_watch_script 2 1 "$TMP/fake-metrics")" > "$W/thermal-watch.txt"
+check_match "a 2 s watch at 1 s takes at least 3 samples" "^PASS ([3-9]|[1-9][0-9]+) samples" "$(evaluate_criterion thermal-watch "$W")"
+sh -c "$(thermal_watch_script 600 10 "$TMP/fake-refused")" > "$W/thermal-watch.txt"
+check_match "the watch stops at once when sudo refuses, and says why" "^FAIL thermal-watch refused: sudo: a password is required" "$(evaluate_criterion thermal-watch "$W")"
+sh -c "$(thermal_watch_script 0 0 "$TMP/fake-broken")" > "$W/thermal-watch.txt"
+check_match "a sample the kext refuses fails the watch" "^FAIL sample 1 failed \(rc 1\): Metrics failed 0xe00002d8" "$(evaluate_criterion thermal-watch "$W")"
+check_match "the sudoers rule names the fixed path and only the metrics verb" \
+    "^pc ALL=\(root\) NOPASSWD: /Users/pc/navi-stage/acceptance/navi48test metrics$" "$(thermal_sudoers_rule)"
+
 printf '%d passed, %d failed\n' "$passes" "$fails"
 [ "$fails" -eq 0 ]

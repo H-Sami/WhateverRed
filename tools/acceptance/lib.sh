@@ -409,6 +409,115 @@ crit_tmr_in_tail() {
     else printf 'FAIL PSP TMR vram+%#x (+%#x) outside the reserved tail [%#x, %#x)\n' "$off" "$size" "$lo" "$hi"; fi
 }
 
+# --- ticket #18: the idle clamp and the thermal watch ------------------------------------------------------
+# Both join every run whose ladder target reaches SMUInit (stage 9, the SMU online); below that they would
+# only measure a card nothing has touched, so stage 1..8 runs are unchanged. accept.sh registers them.
+SMU_ONLINE_STAGE=9
+THERMAL_WATCH_SECONDS=600   # the watch: 10 minutes after the ladder (--thermal-watch S overrides, 0 = off)
+THERMAL_WATCH_PERIOD=10     # seconds between samples
+THERMAL_JUNCTION_MAX=95     # FAIL above this junction (hotspot) temperature, C
+THERMAL_FAN_STOP_MAX=60     # FAIL on a fan at 0 rpm above this temperature (the hotter of edge and junction), C
+stage_criteria() {   # stage_criteria <stage>: the criteria a run to that stage gets without asking
+    [ "$1" -ge "$SMU_ONLINE_STAGE" ] 2>/dev/null || return 0
+    printf '%s\n' idle-clamp thermal-watch
+}
+thermal_watch_default() {   # thermal_watch_default <stage>: the watch length in seconds when no flag says
+    if [ "$1" -ge "$SMU_ONLINE_STAGE" ] 2>/dev/null; then echo "$THERMAL_WATCH_SECONDS"; else echo 0; fi
+}
+
+# The watch's sampler: tools/pc/navi48test, which accept.sh's preflight builds on the bench at this fixed
+# path, run as root (the user client is root-only) through a passwordless sudo rule that names this path
+# and the `metrics` verb only (thermal_sudoers_rule; /etc/sudoers.d/whateverred-metrics, installed by the
+# owner). `metrics` is the read-only Metrics verb (selector 11; tests/thermal_verb_test.cpp pins it).
+THERMAL_TOOL=/Users/pc/navi-stage/acceptance/navi48test
+THERMAL_SAMPLE_CMD="sudo -n $THERMAL_TOOL metrics"
+thermal_sudoers_rule() { echo "pc ALL=(root) NOPASSWD: $THERMAL_TOOL metrics"; }
+# thermal_watch_script <duration s> <period s> <sample command>: the sh script the collector runs on the
+# bench (one SSH session). One sample at once, then one every <period> s until <duration> s have passed;
+# writes the format crit_thermal_watch reads. A sudo refusal stops it at once ("thermal-watch refused:").
+thermal_watch_script() {
+    cat <<EOF
+d=$1; p=$2; t0=\$(date +%s); i=0
+echo "thermal-watch start \$t0 period \$p duration \$d"
+while :; do
+    i=\$((i + 1)); t=\$(date +%s)
+    out=\$($3 2>&1); rc=\$?
+    case "\$out" in "sudo: "*) echo "thermal-watch refused: \$(printf '%s\n' "\$out" | head -n 1)"; exit 0 ;; esac
+    echo "sample \$i \$t rc \$rc"; printf '%s\n' "\$out"
+    [ \$((\$(date +%s) - t0)) -ge "\$d" ] && break
+    sleep "\$p"
+done
+echo "thermal-watch end \$(date +%s)"
+EOF
+}
+
+# crit_idle_clamp <dir>: the ladder's end clamps GFXCLK low (amdgpu_init.cpp, "idle clamp: GFXCLK -> low
+# applied|FAILED"). A run must never pass with GFXCLK unclamped and no record of it: FAIL on any FAILED
+# line, and FAIL when there is no idle clamp line at all (clamp off, or the SMU never came online).
+crit_idle_clamp() {
+    local L m
+    L=$(grep -v "^$LOG_READ_OK " "$1/log.txt" 2>/dev/null | grep -E 'idle clamp: ')
+    [ -n "$L" ] || { echo "FAIL no 'idle clamp:' line: GFXCLK was never clamped (navi48-idle-clamp=0, or the SMU was not online)"; return; }
+    m=$(printf '%s\n' "$L" | grep -E 'idle clamp: .* FAILED' | head -n 1)
+    if [ -n "$m" ]; then echo "FAIL $m"; return; fi
+    m=$(printf '%s\n' "$L" | grep -E 'idle clamp: GFXCLK -> low applied' | head -n 1)
+    if [ -n "$m" ]; then echo "PASS $m"; else echo "FAIL idle clamp not applied: $(printf '%s\n' "$L" | head -n 1)"; fi
+}
+
+# crit_thermal_watch <dir>: <dir>/thermal-watch.txt, written by accept.sh's collect_thermal_watch:
+#   thermal-watch start <epoch> period <s> duration <s>
+#   sample <n> <epoch> rc <exit code of `sudo -n navi48test metrics`>, then that command's output
+#   ... thermal-watch end <epoch>   (only when the whole duration ran)   or   thermal-watch refused: <why>
+# Junction = navi48test's "hotspot" (upstream smu_v14_0_2_ppt.c METRICS_TEMPERATURE_HOTSPOT). FAILs, first
+# reason wins: not collected, refused, a sample that failed or was implausible (the kext's range check),
+# no samples, a junction above THERMAL_JUNCTION_MAX, a stopped fan above THERMAL_FAN_STOP_MAX, a watch cut
+# short. Every verdict with samples carries the min/max/last of junction, edge and fan.
+crit_thermal_watch() {
+    local f="$1/thermal-watch.txt"
+    [ -r "$f" ] || { echo "FAIL thermal watch not collected"; return; }
+    awk -v jmax="$THERMAL_JUNCTION_MAX" -v fmax="$THERMAL_FAN_STOP_MAX" '
+        function upd(k, v) { if (!((k, "n") in s)) { s[k, "min"] = v; s[k, "max"] = v; s[k, "n"] = 1 }
+                             if (v < s[k, "min"]) s[k, "min"] = v; if (v > s[k, "max"]) s[k, "max"] = v; s[k, "last"] = v }
+        function mml(k) { return s[k, "min"] "/" s[k, "max"] "/" s[k, "last"] }
+        function fail(m) { if (why == "") why = m }
+        function close_sample() {
+            if (cur == "") return
+            if (rc != 0) fail("sample " cur " failed (rc " rc "): " first)
+            else if (bad) fail("sample " cur " implausible (the kext range check FAILED; the decode cannot be trusted)")
+            else if (!got) fail("sample " cur " has no temps line: " first)
+            cur = ""
+        }
+        /^thermal-watch start / { started = 1; t0 = $3; next }
+        /^thermal-watch refused: / { fail($0); next }
+        /^thermal-watch end / { close_sample(); ended = 1; t1 = $3; next }
+        /^sample [0-9]+ [0-9]+ rc / { close_sample(); cur = $2; rc = $5; bad = 0; got = 0; first = ""; n++; tl = $3; next }
+        cur == "" { next }
+        first == "" && NF { first = $0 }
+        /range check: FAILED/ { bad = 1 }
+        /^temps / {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "edge") e = $(i + 1); if ($i == "hotspot") j = $(i + 1)
+                if ($i == "fan") fn = $(i + 1)
+            }
+            if (rc != 0 || bad) next
+            got = 1; upd("j", j + 0); upd("e", e + 0); upd("f", fn + 0)
+            if (j + 0 > jmax) fail("junction " j " C > " jmax " C at sample " cur)
+            hot = (j + 0 > e + 0) ? j + 0 : e + 0
+            if (fn + 0 == 0 && hot > fmax) fail("fan 0 rpm at " hot " C at sample " cur)
+        }
+        END {
+            close_sample()
+            if (!started && why == "") why = "thermal watch not collected (no start line)"
+            if (why == "" && n == 0) why = "no samples"
+            if (why == "" && !ended) why = "watch cut short after " n " samples"
+            sum = ""
+            if (("j", "n") in s)
+                sum = sprintf("%d samples over %d s: junction min/max/last %s C, edge %s C, fan %s rpm",
+                              n, (ended ? t1 : tl) - t0, mml("j"), mml("e"), mml("f"))
+            if (why != "") print "FAIL " why (sum == "" ? "" : "; " sum)
+            else print "PASS " sum
+        }' "$f"
+}
 # Named expectation sets (--expect-preset NAME): one criterion per line, as --expect / --expect-log register them.
 #   navi44-stage1  ticket #16: attached to 1002:7590, stage 1 (IPDiscovery) reached, gc_info geometry 2/2/8/8 accepted
 #   navi44-stage9  ticket #17: stage 9 (SMUInit) reached, PMFW 102.70.0, BAR0 plan OK at 256 MiB with vramLimit

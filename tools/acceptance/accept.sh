@@ -16,6 +16,9 @@
 #     --expect-no-attach    no Navi48Bringup instance may attach
 #     --expect-preset NAME  a named set of the above, from lib.sh expect_preset (navi44-stage1, navi44-stage9)
 #     --settle S            seconds between the load and the collection (default 20)
+#     --thermal-watch S     after the collection, sample junction/edge/fan for S s (default 600 at --stage >= 9,
+#                           0 = off; off below 9). Needs /etc/sudoers.d/whateverred-metrics (lib.sh). Stage >= 9
+#                           also adds idle-clamp: a log line "idle clamp: ... FAILED" (or none) fails the run
 #     --force-cycle         run even when the preflight finds the kext missing or the chown not allowed
 #                           (kext-loaded then FAILs)
 #     --host H              SSH host (default mac)
@@ -50,11 +53,11 @@ register_collector() { COLLECTORS="$COLLECTORS $1"; }
 for plugin in "$HERE"/criteria.d/*.sh; do [ -r "$plugin" ] && . "$plugin"; done
 
 HOST=mac CYCLES=3 STAGE=1 EXTRA=() KEXT=$STAGED_KEXT SETTLE=20
-FORCE=0 MODE=run DEMO="" RESTAGE=""
+FORCE=0 MODE=run DEMO="" RESTAGE="" WATCH=""
 REMOTE_DIR=navi-stage/acceptance          # relative to the Mac user's home
 RETURN_TIMEOUT=180
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --cycles) CYCLES=$2; shift ;;
@@ -67,6 +70,7 @@ while [ $# -gt 0 ]; do
         --expect-preset) p=$(expect_preset "$2") || { echo "unknown preset: $2" >&2; exit 2; }
             while IFS= read -r c; do register_criterion "$c"; done <<< "$p"; shift ;;
         --settle) SETTLE=$2; shift ;;
+        --thermal-watch) WATCH=$2; shift ;;
         --force-cycle) FORCE=1 ;;
         --host) HOST=$2; shift ;;
         --disarm) MODE=disarm ;;
@@ -78,6 +82,16 @@ while [ $# -gt 0 ]; do
 done
 case "$CYCLES" in ""|*[!0-9]*|0) echo "--cycles must be a positive number" >&2; exit 2 ;; esac
 case "$SETTLE" in ""|*[!0-9]*) echo "--settle must be a number" >&2; exit 2 ;; esac
+# Ticket #18: once the ladder reaches SMUInit (stage >= 9) every run also checks the idle clamp and, unless
+# --thermal-watch 0, watches the card's temperatures for THERMAL_WATCH_SECONDS after the ladder. Stage 1..8
+# runs get neither (the stage-1 criteria and timing are unchanged).
+[ -n "$WATCH" ] || WATCH=$(thermal_watch_default "$STAGE")
+case "$WATCH" in *[!0-9]*) echo "--thermal-watch must be a number of seconds" >&2; exit 2 ;; esac
+for c in $(stage_criteria "$STAGE"); do
+    [ "$c" = thermal-watch ] && continue
+    register_criterion "$c"
+done
+if [ "$WATCH" -gt 0 ]; then register_criterion thermal-watch; register_collector thermal-watch; fi
 
 say() { printf '[%s] %s\n' "$(date +%T)" "$*"; }
 
@@ -173,9 +187,27 @@ rsh "mkdir -p ~/$REMOTE_DIR" && scp -q "$HERE/fbread.c" "$HOST:$REMOTE_DIR/fbrea
     && rsh "cd ~/$REMOTE_DIR && clang -O2 -Wall -framework IOKit -framework CoreFoundation fbread.c -o fbread" \
     || { echo "could not build fbread on $HOST" >&2; exit 2; }
 
+# The thermal watch's sampler: build tools/pc/navi48test on the bench at THERMAL_TOOL (sources copied into
+# ~/REMOTE_DIR/navi48test-src) and check sudo -n may run `THERMAL_TOOL metrics` (the kext answers NotReady
+# while nothing is armed; only a sudo refusal matters here).
+if [ "$WATCH" -gt 0 ]; then
+    msg=""
+    [ "$(rsh 'echo $HOME')/$REMOTE_DIR/navi48test" = "$THERMAL_TOOL" ] || msg="$THERMAL_TOOL is not ~/$REMOTE_DIR/navi48test on $HOST (lib.sh THERMAL_TOOL)"
+    [ -n "$msg" ] || (cd "$REPO" && tar cf - tools/pc/navi48test.c $(cd "$REPO" && find src/navi48-bringup/src -name '*.h'))         | rsh "rm -rf ~/$REMOTE_DIR/navi48test-src && mkdir -p ~/$REMOTE_DIR/navi48test-src && tar xf - -C ~/$REMOTE_DIR/navi48test-src                && clang -O2 -Wall -I ~/$REMOTE_DIR/navi48test-src/src/navi48-bringup/src/apple -framework IOKit -framework CoreFoundation                     ~/$REMOTE_DIR/navi48test-src/tools/pc/navi48test.c -o $THERMAL_TOOL" > "${TMPDIR:-/tmp}/navi48test-build.$$" 2>&1         || msg="could not build navi48test on $HOST: $(grep -m 1 -i error "${TMPDIR:-/tmp}/navi48test-build.$$")"
+    rm -f "${TMPDIR:-/tmp}/navi48test-build.$$"
+    if [ -z "$msg" ]; then
+        case "$(rsh "$THERMAL_SAMPLE_CMD" 2>&1 | head -n 1)" in "sudo: "*)
+            msg="sudo -n may not run $THERMAL_TOOL metrics (install /etc/sudoers.d/whateverred-metrics: $(thermal_sudoers_rule))" ;; esac
+    fi
+    if [ -n "$msg" ]; then
+        if [ "$FORCE" = 1 ]; then say "WARNING: $msg (--force-cycle: running anyway, thermal-watch will FAIL)"
+        else echo "REFUSING: $msg. Pass --thermal-watch 0 to run without the watch, or --force-cycle." >&2; exit 2; fi
+    else say "thermal watch: ${WATCH} s after the ladder, one sample every $THERMAL_WATCH_PERIOD s ($THERMAL_TOOL metrics)"; fi
+fi
+
 RUN="$REPO/runs/acceptance-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$RUN"
 { echo "host $HOST cycles $CYCLES token $ARM_KEY=$TOKEN_VALUE kext $KEXT settle $SETTLE"
-  echo "extra ${EXTRA[*]+${EXTRA[*]}}"; echo "criteria:"; printf '%s\n' "$CRITERIA"; } > "$RUN/params.txt"
+  echo "extra ${EXTRA[*]+${EXTRA[*]}}"; echo "thermal watch $WATCH s"; echo "criteria:"; printf '%s\n' "$CRITERIA"; } > "$RUN/params.txt"
 say "run directory: $RUN"
 
 # --- the safety net -------------------------------------------------------------------------------------
@@ -218,6 +250,14 @@ kernel_log() {
 uptime_s() { rsh 'echo $(( $(date +%s) - $(sysctl -n kern.boottime | sed -E "s/.*[{] sec = ([0-9]+).*/\1/") ))' 2>/dev/null; }
 capture_console() {   # capture_console <file.ppm>
     rsh "~/$REMOTE_DIR/fbread" > "$1" 2> "$1.err" || say "fbread failed: $(cat "$1.err")"
+}
+
+# collect_thermal_watch <dir>: WATCH seconds of `navi48test metrics` samples in one SSH session, after
+# everything else is collected -> <dir>/thermal-watch.txt (crit_thermal_watch reads it).
+collect_thermal_watch() {
+    say "thermal watch: sampling for $WATCH s"
+    thermal_watch_script "$WATCH" "$THERMAL_WATCH_PERIOD" "$THERMAL_SAMPLE_CMD"         | timeout $((WATCH + 120)) ssh "${SSHO[@]}" "$HOST" 'sh -s' > "$1/thermal-watch.txt" 2>&1
+    say "thermal watch: $(crit_thermal_watch "$1")"
 }
 
 run_cycle() {   # run_cycle <n> <dir>; returns 3 if the bench did not come back
