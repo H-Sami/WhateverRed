@@ -1,5 +1,5 @@
 #!/bin/zsh
-# navi44_identity_plant.sh - planted breaks for tests/navi44_identity_test.cpp (ticket #16, spec #14: the Navi 44 identity module).
+# navi44_identity_plant.sh - planted breaks for tests/navi44_identity_test.cpp (tickets #16 and #17, spec #14: the Navi 44 identity module and firmware set).
 # For each plant: copy the real sources into a scratch tree, apply the break (exact-once replacements; the script first proves each replaced text occurs exactly once),
 # compile the real test against the scratch tree and demand that it FAILS (a compile error, a failing check, a crash or a hang cut off by the alarm all count).
 # A plant the suite lets through is a hole: the script exits non-zero and says which. The CONTROL (no break) must pass.
@@ -19,6 +19,8 @@ fresh() {
   cp "$ROOT/$K/Info.plist" "$SCR/$K/"
   cp "$ROOT/$K/tests/navi44_identity_test.cpp" "$SCR/$K/tests/"
   cp "$ROOT/tools/conductor/suites.sh" "$SCR/tools/conductor/"
+  mkdir -p "$SCR/$K/hosttest"; cp "$ROOT/$K/Makefile" "$SCR/$K/"; cp "$ROOT/$K/hosttest/main.cpp" "$ROOT/$K/hosttest/check_firmware.cpp" "$SCR/$K/hosttest/"
+  cp "$ROOT/tools/fetch-firmware.sh" "$SCR/tools/"   # ticket #17: the firmware pins read these
 }
 build_run() {   # prints the verdict line; returns 0 if the suite PASSED, 1 if it failed, 2 if it did not compile
   local out
@@ -65,6 +67,13 @@ PL=$K/Info.plist
 IP=$SR/amd/amdgpu_ip.h
 PEER=$SR/apple/Navi48AccelPeer.cpp
 SU=tools/conductor/suites.sh
+FT=$SR/amd/fw_table.cpp
+MK=$K/Makefile
+CK=$K/hosttest/check_firmware.cpp
+HT=$K/hosttest/main.cpp
+FE=tools/fetch-firmware.sh
+SMU=$SR/amd/smu_v14_0.cpp
+INIT=$SR/amd/amdgpu_init.cpp
 
 control
 # --- device ID
@@ -138,5 +147,36 @@ plant 48 $IP "kIP_PSP is a literal again" 'kIP_PSP  = ip_of(n44id::kPsp);' 'kIP_
 plant 49 $IP "kIP_NBIO reads the wrong IP" 'kIP_NBIO = ip_of(n44id::kNbif);' 'kIP_NBIO = ip_of(n44id::kHdp);'
 plant 50 $PEER "strnstr is back" 'if (cls && name_has_accel(cls, 64) && ' 'if (cls && strnstr((char *)cls, "Accel", 64) && '
 plant 51 $SU "the suite does not run the test" '$T/navi44_identity_test.cpp' '$T/navi44_identity_test.cc'
+# --- firmware (ticket #17): the set, its versions and the check
+plant 52 $P "the SMU pin is linux-firmware tip's 102.71.0" 'kSmuVersion = 0x00664600u;' 'kSmuVersion = 0x00664700u;'
+plant 53 $P "the SOS floor is lowered" 'kSosMinForReservation = 0x003b0e0du;' 'kSosMinForReservation = 0x003b0000u;'
+plant 54 $P "the SOS floor is not checked" '&& got < kSosMinForReservation) return kFwSosTooOld;' '&& got < 1) return kFwSosTooOld;'
+plant 55 $P "ME is pinned one off" '0x00000bc2u' '0x00000bc3u'
+plant 56 $P "uni_mes is checked by its (zero) ucode_version" '"gc_12_0_0_uni_mes", 12, 0, kByCrc32,  ' '"gc_12_0_0_uni_mes", 12, 0, kByUcodeVersion,'
+plant 57 $P "ucode_version is read at the wrong offset" 'rd32(d + 16) == f.value' 'rd32(d + 20) == f.value'
+plant 58 $P "the IP version is not checked" 'if (rd16(d + 12) != f.ipMajor || rd16(d + 14) != f.ipMinor) return kFwIpMismatch;' ''
+plant 59 $P "size_bytes is not checked against the file" 'if (!d || len < 32 || rd32(d) != len) return kFwTruncated;' 'if (!d || len < 32) return kFwTruncated;'
+plant 60 $P "the set names Navi 48's SMU" '{ "smu_14_0_2",        14, 0' '{ "smu_14_0_3",        14, 0'
+plant 61 $P "a kicker blob joins the set" '{ "sdma_7_0_0", ' '{ "psp_14_0_2_sos_kicker", 14, 0, kByUcodeVersion, 0, 0, {} }, { "sdma_7_0_0", '
+plant 62 $P "TA HDCP is not pinned" '3, { { kPspFwAsd, 0x21000110u }, { kPspFwHdcp, 0x17000050u }, { kPspFwDtm, 0x1200001du } }' '2, { { kPspFwAsd, 0x21000110u }, { kPspFwDtm, 0x1200001du }, { kPspFwHdcp, 0x17000050u } }'
+plant 63 $P "the set check skips a missing blob" 'if (!load(kFirmware[i].name, &d, &len)) return { kFwMissing, i };' 'if (!load(kFirmware[i].name, &d, &len)) continue;'
+plant 64 $P "external_rev_id wraps at 8 bits" 'return uint32_t(pciRevision) + 0x40u;' 'return uint8_t(pciRevision + 0x40u);'
+plant 65 $P "the linux-firmware pin is another commit" '"2a12d06438f2092115b9cf53dca79258bf283f88"' '"bcf2086600000000000000000000000000000000"'
+plant 66 $FT "fw_table declares Navi 48's SMU" 'extern const uint8_t fw_smu_14_0_2[];' 'extern const uint8_t fw_smu_14_0_3[];'
+plant 67 $FT "fw_table looks uni_mes up under its Navi 48 name" '"gc_12_0_0_uni_mes", FwId' '"gc_12_0_1_uni_mes", FwId'
+plant 68 $B "stagePSP parses Navi 48's SOS" 'psp.parseContainer(fw_psp_14_0_2_sos, fw_psp_14_0_2_sos_size)' 'psp.parseContainer(fw_psp_14_0_3_sos, fw_psp_14_0_3_sos_size)'
+plant 69 $MK "the firmware gate no longer runs before the objects" '$(OBJS): | check-firmware' '$(OBJS):'
+plant 70 $MK "the Makefile keeps its own name list" 'HOSTCXX := xcrun clang++' 'HOSTCXX := xcrun clang++
+FW_REQUIRED := gc_12_0_0_imu'
+plant 71 $CK "the checker never fails the build" 'return 1;' 'return 0;'
+plant 72 $FE "fetch-firmware pins another commit" 'PINNED_COMMIT=2a12d06438f2092115b9cf53dca79258bf283f88' 'PINNED_COMMIT=bcf2086600000000000000000000000000000000'
+plant 73 $FE "fetch-firmware keeps a sha256 mismatch" 'rm -f "$DST/$name.bin"; bad=1' 'echo "copied anyway"'
+plant 74 $FE "fetch-firmware copies Navi 48's SMU" 'smu_14_0_2        1fe947' 'smu_14_0_3        1fe947'
+plant 75 $HT "hosttest reads Navi 48's SDMA" '"sdma_7_0_0.bin"' '"sdma_7_0_1.bin"'
+plant 76 $B "probe does not publish Navi48,ExternalRevId" 'setProperty("Navi48,ExternalRevId", ' 'setProperty("Navi48,ExtRevId", '
+plant 77 $SMU "a second EnableAllSmuFeatures (reset path)" 'kern_return_t r = smu_send_msg(dev, PPSMC::DisableAllSmuFeatures);' 'kern_return_t r = smu_send_msg(dev, PPSMC::EnableAllSmuFeatures);'
+plant 78 $SMU "JPEG_DPG power gating" 'SMU_LOG("disable_all_features: kr=0x%x", (unsigned)r);' 'SMU_LOG("disable_all_features: kr=0x%x JPEG_DPG", (unsigned)r);'
+plant 79 $SMU "an energy accumulator" 'SMU_LOG("smc_hw_setup: EnableAllSmuFeatures ok");' 'SMU_LOG("smc_hw_setup: EnableAllSmuFeatures ok, EnergyAcc on");'
+plant 80 $SMU "FEATURE_PWR_GFX enabled" 'SMU_LOG("smc_hw_setup: EnableAllSmuFeatures ok");' 'SMU_LOG("smc_hw_setup: EnableAllSmuFeatures ok, FEATURE_PWR_GFX");'
 echo "plants: $total run, $escaped escaped/failed"
 [ "$escaped" -eq 0 ]

@@ -128,7 +128,7 @@ std::string hex8At(const std::vector<uint8_t> &data, uint64_t offset) {
 // amdgpu_ucode_extract() should emit, in order (taken from the task's
 // reference-driver firmware mapping, cross-checked against what
 // amdgpu_ucode_extract.cpp's extract_*() functions actually do for
-// gfx_v12_0 / gc_12_0_1 / psp_v14_0 — e.g. RDNA4 registers only P0 for
+// gfx_v12_0 / gc_12_0_0 / psp_v14_0 — e.g. RDNA4 registers only P0 for
 // PFP/ME and P0+P1 for MEC, and extract_mes() unconditionally emits both
 // the SCHED and KIQ pipe payloads from the same uni_mes.bin bytes).
 // ---------------------------------------------------------------------
@@ -220,26 +220,26 @@ int main(int argc, char **argv) {
     // (CP_MES/CP_MES_DATA) and KIQ (CP_MES_KIQ/MES_KIQ_STACK) pipe payloads
     // unconditionally from the same uni_mes.bin bytes.
     std::vector<BlobSpec> blobs = {
-        {"sdma_7_0_1.bin",        kHostFwFile_SDMA,   "sdma",
+        {"sdma_7_0_0.bin",        kHostFwFile_SDMA,   "sdma",
          {PSPGfxFwType::SDMA_UCODE_TH0}},
-        {"gc_12_0_1_rlc.bin",     kHostFwFile_RLC,     "rlc",
+        {"gc_12_0_0_rlc.bin",     kHostFwFile_RLC,     "rlc",
          {PSPGfxFwType::RLC_RESTORE_LIST_GPM_MEM,
           PSPGfxFwType::RLC_RESTORE_LIST_SRM_MEM,
           PSPGfxFwType::RLC_IRAM,
           PSPGfxFwType::RLC_DRAM_BOOT,
           PSPGfxFwType::RLC_G}},
-        {"gc_12_0_1_imu.bin",     kHostFwFile_IMU,     "imu",
+        {"gc_12_0_0_imu.bin",     kHostFwFile_IMU,     "imu",
          {PSPGfxFwType::IMU_I, PSPGfxFwType::IMU_D}},
-        {"gc_12_0_1_uni_mes.bin", kHostFwFile_MES_UNI, "uni_mes",
+        {"gc_12_0_0_uni_mes.bin", kHostFwFile_MES_UNI, "uni_mes",
          {PSPGfxFwType::CP_MES, PSPGfxFwType::CP_MES_DATA,
           PSPGfxFwType::CP_MES_KIQ, PSPGfxFwType::MES_KIQ_STACK}},
-        {"gc_12_0_1_pfp.bin",     kHostFwFile_CP_PFP,  "pfp",
+        {"gc_12_0_0_pfp.bin",     kHostFwFile_CP_PFP,  "pfp",
          {PSPGfxFwType::RS64_PFP, PSPGfxFwType::RS64_PFP_P0}},
-        {"gc_12_0_1_me.bin",      kHostFwFile_CP_ME,   "me",
+        {"gc_12_0_0_me.bin",      kHostFwFile_CP_ME,   "me",
          {PSPGfxFwType::RS64_ME, PSPGfxFwType::RS64_ME_P0}},
-        {"gc_12_0_1_mec.bin",     kHostFwFile_CP_MEC,  "mec",
+        {"gc_12_0_0_mec.bin",     kHostFwFile_CP_MEC,  "mec",
          {PSPGfxFwType::RS64_MEC, PSPGfxFwType::RS64_MEC_P0, PSPGfxFwType::RS64_MEC_P1}},
-        {"smu_14_0_3.bin",        kHostFwIPBase + PSPGfxFwType::SMU, "smu",
+        {"smu_14_0_2.bin",        kHostFwIPBase + PSPGfxFwType::SMU, "smu",
          {PSPGfxFwType::SMU}},
     };
 
