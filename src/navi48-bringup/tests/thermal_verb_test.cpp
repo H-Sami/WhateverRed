@@ -40,8 +40,24 @@ static std::string body(const std::string &s, const std::string &head) {
     }
     return "";
 }
+// `s` with comments and string / char literals blanked, so prose in them never reads as a call.
+static std::string code_only(const std::string &in) {
+    std::string s = in;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '/') { while (i < s.size() && s[i] != '\n') s[i++] = ' '; }
+        else if (s[i] == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            while (i < s.size() && !(s[i] == '*' && i + 1 < s.size() && s[i + 1] == '/')) s[i++] = ' ';
+            if (i + 1 < s.size()) { s[i] = ' '; s[i + 1] = ' '; i++; }
+        } else if (s[i] == '"' || s[i] == '\'') {
+            const char q = s[i];
+            for (i++; i < s.size() && s[i] != q; i++) { if (s[i] == '\\' && i + 1 < s.size()) s[i++] = ' '; s[i] = ' '; }
+        }
+    }
+    return s;
+}
 // Every identifier in `s` that is followed by "(" (a call or a macro use; not a keyword), in order.
-static std::vector<std::string> calls(const std::string &s) {
+static std::vector<std::string> calls(const std::string &in) {
+    const std::string s = code_only(in);
     std::vector<std::string> out;
     for (size_t i = 0; i < s.size(); i++) {
         if (s[i] != '(') continue;
