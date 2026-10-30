@@ -193,7 +193,7 @@ S9LOG='22:10:01 probe: Navi 44 RX 9060 XT (0x7590) - bring-up enabled
 22:10:01 vram: BAR0 plan: IOPCIFamily [0x7000000000, +256 MiB), config space 0x7000000000, ReBAR none 256 MiB, VRAM 16304 MiB -> OK (map 256 MiB, vramLimit 256 MiB)
 22:10:01 vram: vramLimit 256 MiB (mapped 256 MiB, VRAM 16304 MiB, hi reserve 768 MiB)
 22:10:02 psp: query_fw_reservation: FB_FW_RESERV_ADDR ok (resp=0) addr=0x83f8600000 size=0x1000000
-22:10:03 smu: PMFW version 102.70.0'
+22:10:03 smu: hw_init: SMU online (pmfw 0x00664600, if 0x00000033)'
 printf '%s\n' "$S9LOG" > "$C/log.txt"
 check "navi44-stage9 preset has 9 criteria" "9" "$(expect_preset navi44-stage9 | wc -l | tr -d ' ')"
 pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage9)"
@@ -209,7 +209,7 @@ check_match "tmr-in-tail fails when SOS reports no reservation" "^FAIL" "$(evalu
 printf '%s\n' "$S9LOG" | grep -v query_fw_reservation > "$C/log.txt"
 check_match "tmr-in-tail fails without the reservation line" "^FAIL no 'query_fw" "$(evaluate_criterion tmr-in-tail "$C")"
 sed 's/"SMU,FirmwareVersion" = 6702592/"SMU,FirmwareVersion" = 6702848/' "$C/ioreg.txt" > "$C/i2" && mv "$C/i2" "$C/ioreg.txt"
-printf '%s\n' "$S9LOG" | sed -e 's/102\.70\.0/102.71.0/' -e 's/-> OK (map 256 MiB, vramLimit 256 MiB)/-> OK (map 256 MiB, vramLimit 128 MiB)/' > "$C/log.txt"
+printf '%s\n' "$S9LOG" | sed -e 's/pmfw 0x00664600/pmfw 0x00664700/' -e 's/-> OK (map 256 MiB, vramLimit 256 MiB)/-> OK (map 256 MiB, vramLimit 128 MiB)/' > "$C/log.txt"
 pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage9)"
 check "navi44-stage9 fails on PMFW 102.71.0 and a 128 MiB vramLimit" "3" "$pf"
 

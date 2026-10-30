@@ -436,7 +436,7 @@ ioreg Navi48,StageTarget=9
 ioreg Navi48,StageReached=9
 ioreg Navi48,StageReachedName=SMUInit
 ioreg SMU,FirmwareVersion=6702592
-log smu: PMFW version 102\.70\.0
+log smu: hw_init: SMU online \(pmfw 0x00664600,
 log vram: BAR0 plan: .* -> OK \(map 256 MiB, vramLimit 256 MiB\)
 tmr-in-tail
 PRESET
