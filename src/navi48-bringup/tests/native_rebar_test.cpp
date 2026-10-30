@@ -22,6 +22,7 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <sys/stat.h>
 #include "amd/rebar_pure.h"
 #include "amd/native_fb_pure.h"
 #include "amd/native_disp_pure.h"
@@ -390,9 +391,11 @@ static void p8_identity() {
 }
 
 // P9 (item 9): the four variants are the live variants with EXACTLY the contract's changes: -rebar0 drops npci=0x2000 from boot-args; -rebar1g also sets Booter Quirks ResizeAppleGpuBars to 10;
-// ResizeGpuBars stays -1; nothing else differs.
+// ResizeGpuBars stays -1; nothing else differs. The variants are private OpenCore configs, not in git: with no <root>/variants/ directory P9 is skipped (loudly); a present but incomplete one still fails.
 static std::string replace_once(const std::string &s, const std::string &o, const std::string &n) { const size_t p = s.find(o); return p == std::string::npos || count_of(s, o) != 1 ? std::string("<<NOT ONCE>>") : s.substr(0, p) + n + s.substr(p + o.size()); }
 static void p9_variants(const std::string &root) {
+    struct stat st;
+    if (stat((root + "/variants").c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) { std::printf("SKIPPED: P9: %s/variants/ is missing (private OpenCore configs, not in git): the variant checks did not run\n", root.c_str()); return; }
     const std::string D = root + "/variants/configs/";
     const char *bases[2] = { "stage17-native-1440-metal-disp-amfi-ms-apps", "stage17-native-1440-metal-disp-amfi-m6flip3" };
     for (const char *b : bases) {
