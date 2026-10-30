@@ -6967,6 +6967,12 @@ void Navi48Bringup::runStages(uint32_t target) {
 	ctx.smuFullSetup = (PE_parse_boot_argn("navi48-smu-full", &full, sizeof(full)) && full != 0) ||
 	                   (target >= (uint32_t)amdgpu::BringupStage::RLCInit &&
 	                    !(PE_parse_boot_argn("navi48-smu-basic", &basic, sizeof(basic)) && basic != 0));
+	// Ticket #23: without the full setup, stage 9 runs the minimal SMU feature set (metrics,
+	// GFXCLK DPM for the idle clamp, PMFW thermal + fan; no display/memory/link clock);
+	// navi48-smu-min=0 keeps the #18 driver-table-only stage 9.
+	uint32_t smuMin = 1;
+	PE_parse_boot_argn("navi48-smu-min", &smuMin, sizeof(smuMin));
+	ctx.smuMinimalFeatures = (smuMin != 0);
 	uint32_t mnf = 0;
 	ctx.mesNonFatal = PE_parse_boot_argn("navi48-mes-nonfatal", &mnf, sizeof(mnf)) && mnf != 0;
 	uint32_t legacyRb = 0;
@@ -7075,8 +7081,8 @@ void Navi48Bringup::runStages(uint32_t target) {
 	const uint32_t nativeGate = nativeS1bGate(this);
 	IOAccelNavi48NativeClient::latchBootArgs();   // 0.0.612: boot-arg navi48-metal-ws is read ONCE here (default absent = OFF); the N48N open policy uses the latched value
 	mapDoorbells();   // NBIO doorbell path init (stage 2) needs the BAR2 physical base
-	N48LOG("stages: running ladder to %u (%s); smu-full=%d", target,
-	       amdgpu::stage_name((amdgpu::BringupStage)target), ctx.smuFullSetup);
+	N48LOG("stages: running ladder to %u (%s); smu-full=%d smu-min=%d", target,
+	       amdgpu::stage_name((amdgpu::BringupStage)target), ctx.smuFullSetup, ctx.smuMinimalFeatures);
 	setProperty("Navi48,StageTarget", static_cast<uint64_t>(target), 32);
 	// A previous load of this kext this boot already took the GPU through
 	// PSPFwLoad? The marker lives on the IOPCIDevice, which outlives our

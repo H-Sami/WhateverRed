@@ -114,6 +114,7 @@ struct BringupContext {
     BringupStage   failedAt { BringupStage::None };
     kern_return_t  lastResult { kIOReturnSuccess };
     bool smuFullSetup { false };    // navi48-smu-full=1: run smc_hw_setup (clocks/features)
+    bool smuMinimalFeatures { true };  // ticket #23, navi48-smu-min (default 1): without smuFullSetup, run the minimal feature set
     bool smuOnline { false };
     bool gfxhubReady { false };     // GFXHUB GART enabled + gart_init done (needed before CP/MES/SDMA touch GART sysmem)
     bool doorbellPathReady { false };

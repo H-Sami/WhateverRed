@@ -402,12 +402,16 @@ kern_return_t run_stage(BringupContext &ctx, BringupStage s) {
         if (r != kIOReturnSuccess) { INIT_LOG("SMUInit: TestMessage failed %#x", r); return r; }
         (void)smu_get_version(dev, &ctx.smuVersion);
         dev.smuOnline = true; ctx.smuOnline = true;
-        // smu_hw_init(dev, true) runs the reference's smc_hw_setup (driver table,
-        // DcBtc, power source, feature enable) — it changes clocks/fans while the
+        // smu_hw_init(dev, true, ...) runs the reference's smc_hw_setup (driver table,
+        // DcBtc, power source, all features) — it changes clocks/fans while the
         // firmware console is still scanning out, so it is opt-in via navi48-smu-full=1.
-        kern_return_t hwr = smu_hw_init(dev, ctx.smuFullSetup);
+        // Otherwise (ticket #23) the driver table, then the minimal feature set
+        // (smu_minimal_hw_setup: metrics, GFXCLK DPM, PMFW thermal + fan; no display,
+        // memory or link clock), unless navi48-smu-min=0.
+        kern_return_t hwr = smu_hw_init(dev, ctx.smuFullSetup, ctx.smuMinimalFeatures);
         if (hwr != kIOReturnSuccess)
-            INIT_LOG("SMUInit: smu_hw_init(full=%d) non-fatal failure %#x — proceeding", ctx.smuFullSetup, hwr);
+            INIT_LOG("SMUInit: smu_hw_init(full=%d min=%d) non-fatal failure %#x — proceeding",
+                     ctx.smuFullSetup, ctx.smuMinimalFeatures, hwr);
         return kIOReturnSuccess;
     }
 

@@ -13,7 +13,8 @@
 //       so PMFW is never asked to DMA a table to an address it was never given;
 //   T3  SMUInit tells the SMU where the driver table is even when smc_hw_setup is skipped (stage 9 default),
 //       with only SetDriverDramAddrHigh/Low (upstream smu_v14_0_set_driver_table_location) - no feature,
-//       clock or power message - and smc_hw_setup's own SetDriverDramAddr marks the table too;
+//       clock or power message - and smc_hw_setup's own SetDriverDramAddr marks the table too (ticket #23's
+//       minimal feature setup then follows on that path; tests/smu_features_test.cpp pins it);
 //   T4  the dispatch maps selector 11 to doMetrics, and navi48test's `metrics` prints the lines the harness
 //       thermal watch parses (tools/acceptance/lib.sh crit_thermal_watch).
 //   T5  fail closed (bench 2026-10-30: an all-zero table passed the old upper-bound-only check): the kext's
@@ -135,7 +136,7 @@ int main(int argc, char **argv) {
     expect(has(loc, "PPSMC::SetDriverDramAddrHigh") && has(loc, "PPSMC::SetDriverDramAddrLow") && count_of(loc, "smu_send_msg") == 2,
            "T3 smu_set_driver_table_location sends only SetDriverDramAddrHigh/Low");
     expect(has(loc, "dev.smuDriverTable = true"), "T3 smu_set_driver_table_location marks the table");
-    const std::string hw = body(smu, "smu_hw_init(DeviceContext &dev, bool runSmcHwSetup)");
+    const std::string hw = body(smu, "smu_hw_init(DeviceContext &dev, bool runSmcHwSetup, bool minimalFeatures)");
     const size_t skip = hw.find("if (!runSmcHwSetup)");
     expect(skip != std::string::npos && has(body(hw.substr(skip), "if (!runSmcHwSetup)"), "smu_set_driver_table_location(dev)"),
            "T3 the skipped-setup path of smu_hw_init places the driver table");

@@ -356,6 +356,8 @@ namespace PPSMC {
     constexpr uint32_t SetAllowedFeaturesMaskHigh = 0x05;
     constexpr uint32_t EnableAllSmuFeatures       = 0x06;
     constexpr uint32_t DisableAllSmuFeatures      = 0x07;
+    constexpr uint32_t EnableSmuFeaturesLow       = 0x08;   // ticket #23: selective enable (smu_cmn_feature_update_enable_state)
+    constexpr uint32_t EnableSmuFeaturesHigh      = 0x09;
     constexpr uint32_t GetRunningSmuFeaturesLow   = 0x0C;
     constexpr uint32_t GetRunningSmuFeaturesHigh  = 0x0D;
     constexpr uint32_t SetDriverDramAddrHigh      = 0x0E;

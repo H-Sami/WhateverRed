@@ -75,6 +75,7 @@
 #include "amdgpu_smu.h"
 #include "amdgpu_log.h"
 #include "smu_metrics_check.h"   // ticket #18: the shared fail-closed plausibility check
+#include "smu_features_pure.h"  // ticket #23: the minimal allowed-feature mask and its message plan
 
 #include <kern/thread.h>          // current_thread(): the owner of the shared mailbox lock (0.0.604)
 #include <libkern/OSAtomic.h>
@@ -128,6 +129,8 @@ static const char *smu_msg_name(uint32_t msgId)
     case PPSMC::SetAllowedFeaturesMaskHigh: return "SetAllowedFeaturesMaskHigh";
     case PPSMC::EnableAllSmuFeatures:       return "EnableAllSmuFeatures";
     case PPSMC::DisableAllSmuFeatures:      return "DisableAllSmuFeatures";
+    case PPSMC::EnableSmuFeaturesLow:       return "EnableSmuFeaturesLow";
+    case PPSMC::EnableSmuFeaturesHigh:      return "EnableSmuFeaturesHigh";
     case PPSMC::GetRunningSmuFeaturesLow:   return "GetRunningSmuFeaturesLow";
     case PPSMC::GetRunningSmuFeaturesHigh:  return "GetRunningSmuFeaturesHigh";
     case PPSMC::SetDriverDramAddrHigh:      return "SetDriverDramAddrHigh";
@@ -744,8 +747,50 @@ smu_set_driver_table_location(DeviceContext &dev)
     return kIOReturnSuccess;
 }
 
+// The plan's message ids are the mailbox's (both are typed in from smu_v14_0_2_ppsmc.h).
+static_assert(smu14feat::kMsgRunDcBtc == PPSMC::RunDcBtc, "RunDcBtc");
+static_assert(smu14feat::kMsgSetAllowedFeaturesMaskLow == PPSMC::SetAllowedFeaturesMaskLow, "SetAllowedFeaturesMaskLow");
+static_assert(smu14feat::kMsgSetAllowedFeaturesMaskHigh == PPSMC::SetAllowedFeaturesMaskHigh, "SetAllowedFeaturesMaskHigh");
+static_assert(smu14feat::kMsgEnableAllSmuFeatures == PPSMC::EnableAllSmuFeatures, "EnableAllSmuFeatures");
+static_assert(smu14feat::kMsgEnableSmuFeaturesLow == PPSMC::EnableSmuFeaturesLow, "EnableSmuFeaturesLow");
+static_assert(smu14feat::kMsgEnableSmuFeaturesHigh == PPSMC::EnableSmuFeaturesHigh, "EnableSmuFeaturesHigh");
+static_assert(smu14feat::kMsgGetRunningSmuFeaturesLow == PPSMC::GetRunningSmuFeaturesLow, "GetRunningSmuFeaturesLow");
+static_assert(smu14feat::kMsgGetRunningSmuFeaturesHigh == PPSMC::GetRunningSmuFeaturesHigh, "GetRunningSmuFeaturesHigh");
+
+// Ticket #23: stage 9's minimal, upstream-ordered smc_hw_setup on the Navi 44 path. Runs after
+// smu_set_driver_table_location (driver table + the #18 sentinel probe, which is upstream's 14.0.2
+// setup_pptable read). The mask, the order and the fail-closed rules are smu_features_pure.h's
+// (bit-by-bit justification there; pinned by tests/smu_features_test.cpp); this adapter only puts the
+// plan on the real mailbox and logs the result. Every message is also logged by the mailbox itself.
 kern_return_t
-smu_hw_init(DeviceContext &dev, bool runSmcHwSetup)
+smu_minimal_hw_setup(DeviceContext &dev)
+{
+    const uint64_t mask = smu14feat::kMinimalAllowedMask;
+    SMU_LOG("smc_min: minimal smc_hw_setup, allowed mask 0x%08x_0x%08x (FW_DATA_READ DPM_GFXCLK THROTTLERS "
+            "FW_CTF FAN_CONTROL MEM_TEMP_READ); no display, memory, fabric or link clock feature",
+            smu14feat::mask_hi(mask), smu14feat::mask_lo(mask));
+    auto send = [&dev](uint32_t id, uint32_t param, uint32_t *out) -> bool {
+        return smu_send_msg_with_param(dev, id, param, out) == kIOReturnSuccess;
+    };
+    const smu14feat::MinimalSetupResult res = smu14feat::run_minimal_setup(dev.smuDriverTable, send);
+    SMU_LOG("smc_min: outcome %s, path %s (allowed mask high %s, low %s)",
+            smu14feat::outcome_name(res.outcome), smu14feat::path_name(res.path),
+            res.maskHiOk ? "ok" : "refused/not sent", res.maskLoOk ? "ok" : "refused/not sent");
+    if (res.runningRead) {
+        SMU_LOG("smc_min: running features = 0x%08x_0x%08x", smu14feat::mask_hi(res.running), smu14feat::mask_lo(res.running));
+        const uint64_t extra = smu14feat::outside_mask(res);
+        if (extra != 0)
+            SMU_LOG("smc_min: WARNING running features outside the minimal mask = 0x%08x_0x%08x (left as PMFW set them)",
+                    smu14feat::mask_hi(extra), smu14feat::mask_lo(extra));
+    } else {
+        SMU_LOG("smc_min: running features unreadable");
+    }
+    SMU_LOG("smc_min: GFXCLK DPM %s", smu14feat::gfxclk_dpm_running(res) ? "running" : "NOT running (the idle clamp will be refused)");
+    return res.outcome == smu14feat::Outcome::Enabled ? kIOReturnSuccess : kIOReturnError;
+}
+
+kern_return_t
+smu_hw_init(DeviceContext &dev, bool runSmcHwSetup, bool minimalFeatures)
 {
     // 1. Existing alive-check: TestMessage round-trip.
     uint32_t echo = 0;
@@ -771,6 +816,13 @@ smu_hw_init(DeviceContext &dev, bool runSmcHwSetup)
         // Ticket #18: the driver table address alone, so the thermal
         // verb can read the metrics table. Non-fatal like smc_hw_setup.
         (void)smu_set_driver_table_location(dev);
+        if (minimalFeatures) {
+            // Ticket #23: then the minimal feature set (metrics, GFXCLK DPM for
+            // the idle clamp, PMFW thermal + fan). Non-fatal, like smc_hw_setup.
+            const kern_return_t mr = smu_minimal_hw_setup(dev);
+            SMU_LOG("hw_init: full smc_hw_setup skipped by caller; minimal setup kr=0x%x", (unsigned)mr);
+            return kIOReturnSuccess;
+        }
         SMU_LOG("hw_init: smc_hw_setup skipped by caller — no clock/power "
                 "state was changed");
         return kIOReturnSuccess;

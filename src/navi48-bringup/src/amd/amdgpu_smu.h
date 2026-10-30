@@ -236,19 +236,34 @@ kern_return_t smu_smc_hw_setup(DeviceContext &dev,
 //     3. smu_get_driver_if_version()   — SMC IF version (logged)
 //     4. dev.smuOnline = true
 //     5. smu_smc_hw_setup()            — only when runSmcHwSetup
+//     otherwise smu_set_driver_table_location() (ticket #18), then, when
+//     minimalFeatures, smu_minimal_hw_setup() (ticket #23)
 //
 // Steps 1-3 are read-only as far as the GPU's power state is concerned
 // (they only poke the mailbox, exactly like Navi48Bringup::surveySMU).
 // Step 5 changes clocks/power — see the DANGER note above, which is why
 // `runSmcHwSetup` has no default: the integrator must choose explicitly.
 // A failure inside smc_hw_setup is logged and NOT propagated, matching
-// the reference's SMUInit stage.
-kern_return_t smu_hw_init(DeviceContext &dev, bool runSmcHwSetup);
+// the reference's SMUInit stage. `minimalFeatures` (boot-arg navi48-smu-min,
+// default 1) only matters when runSmcHwSetup is false; it has no default either.
+kern_return_t smu_hw_init(DeviceContext &dev, bool runSmcHwSetup, bool minimalFeatures);
 
 // [ADDED, ticket #18] SetDriverDramAddrHigh/Low for the fixed driver-table
 // slot only (upstream smu_v14_0_set_driver_table_location); sets
 // dev.smuDriverTable. smu_hw_init calls it when smc_hw_setup is skipped.
 kern_return_t smu_set_driver_table_location(DeviceContext &dev);
+
+// [ADDED, ticket #23] The minimal, upstream-ordered smc_hw_setup of stage 9's
+// Navi 44 path, after smu_set_driver_table_location: RunDcBtc, the minimal
+// allowed-feature mask (FW_DATA_READ, DPM_GFXCLK, THROTTLERS, FW_CTF,
+// FAN_CONTROL, MEM_TEMP_READ = 0x00004000_0x30800003; High then Low), then
+// EnableAllSmuFeatures - or, when PMFW refuses the mask (SCPM),
+// EnableSmuFeaturesLow/High with the same mask - then GetRunningSmuFeatures
+// High/Low. Sends nothing if the driver table was not placed. The plan and
+// the bit-by-bit justification are in smu_features_pure.h. Changes power
+// state: GFXCLK DPM, the throttlers and PMFW fan control start running; no
+// display, memory, fabric or PCIe link clock feature is allowed.
+kern_return_t smu_minimal_hw_setup(DeviceContext &dev);
 
 // [ADDED here] Feature control + clock clamps. These live in the
 // reference's user-client (dext/MacAMDGPU.cpp, selectors 33 and 40)

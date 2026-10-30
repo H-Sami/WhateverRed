@@ -8,7 +8,7 @@
 # boot-arg added upstream later is refused until someone classifies it here (fail closed).
 LADDER_ARGS="navi48bringup navi48-stage navi48-psp navi48-smu navi48-interrupts navi48-smu-full
 navi48-smu-basic navi48-mes-nonfatal navi48-cp-legacy-rb navi48-idle-clamp navi48-kcq navi48-hsa-abi
-navi48-doorbell-legacy navi48-gart-high navi48-pdb0"
+navi48-doorbell-legacy navi48-gart-high navi48-pdb0 navi48-smu-min"
 
 # The stale NVIDIA boot-args the bench's NVRAM still carries (classified against the bench's real
 # args on 2026-10-29). Disarm also drops any other nv*/-nv* arg.

@@ -464,6 +464,8 @@ static void i7_fw_pins(const std::string &root) {
 
     // SOC / SMU, as Linux runs Navi 44: external_rev_id = rev + 0x40, no JPEG_DPG power gating, no energy accumulator,
     // and EnableAllSmuFeatures only once, in smc_hw_setup (no reset-path EnableAllSmuFeatures / FEATURE_PWR_GFX).
+    // Ticket #23's minimal stage-9 plan sends its EnableAllSmuFeatures through amd/smu_features_pure.h (only after
+    // PMFW accepted the minimal allowed mask); tests/smu_features_test.cpp pins that one.
     const std::string pr = between(b, "IOService *Navi48Bringup::probe(IOService *provider, SInt32 *score) {", "\n}\n");
     expect(has(pr, "n44id::external_rev_id(pciRev)") && has(pr, "\"Navi48,ExternalRevId\"") && has(pr, "configRead8(kIOPCIConfigRevisionID)"),
            "I7: probe publishes Navi48,ExternalRevId through n44id::external_rev_id");
