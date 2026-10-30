@@ -145,6 +145,7 @@ run native_agdc clang++ $W $SAN -I src/navi48-bringup/src -I src/navi48-bringup/
 run native_rebar clang++ $W $SAN -I src/navi48-bringup/src -I src/navi48-bringup/src/amd $T/native_rebar_test.cpp -- .   # build 0.0.663: Resizable BAR planning, the census, the latch union, the aperture points, vramstat (REBAR.md section 3); the plant script is tests/native_rebar_plant.sh
 run navi44_identity clang++ $W $SAN -I src/navi48-bringup/src -I src/navi48-bringup/src/amd $T/navi44_identity_test.cpp -- .   # ticket #16: the Navi 44 identity (device ID, IP versions, gc_info geometry, the stage-1 gate); the plant script is tests/navi44_identity_plant.sh
 run arm_token clang++ $W $SAN -I src/navi48-bringup/src -I src/navi48-bringup/src/amd $T/arm_token_test.cpp -- .   # ticket #16: the consume-once NVRAM arming token (navi48-arm=stage:N) and the probe that consumes it; the plant script is tests/arm_token_plant.sh
+run thermal_verb clang++ $W $SAN $T/thermal_verb_test.cpp -- .   # ticket #18: the read-only thermal verb (Metrics) and the SMU driver table it needs (source pins)
 if clang -std=c11 -O1 -c src/shadercache/shadercache.c -o "$B/shadercache.o" 2> "$L/sc.build"; then
   run sc_census clang++ $Wn -I $A -I src/shadercache $T/sc_census_test.cpp "$B/shadercache.o" --
 else
