@@ -2281,7 +2281,8 @@ static bool dpg_prop_u64(IOService *s, const char *k, uint64_t *v) {
 // pmap_map_block with flags 0 (0xffffff8000482b10 xorl %r9d,%r9d), so an IOMemoryDescriptor kernel mapping of the BAR cannot differ
 // by cache option - which is what agdc1's first fbbench measured (all five modes 44-47 MiB/s).
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+// ml_io_map_wcomb is not exported to kexts on macOS 26 (kmutil: "Failed to bind '_ml_io_map_wcomb'"), so the second
+// bench mapping is a second ml_io_map (uncached) and slot 12 no longer measures write-combine.
 static vm_offset_t gBenchUc { 0 }, gBenchWc { 0 };
 static uint64_t gBenchBase { 0 }, gBenchLen { 0 };
 
@@ -2379,8 +2380,8 @@ uint32_t navi48_fbbench(uint64_t arg, uint64_t *out, unsigned count) {
         if (!gBenchUc && !gBenchWc) {
             gBenchBase = base; gBenchLen = len;
             gBenchUc = ml_io_map((vm_offset_t)base, (vm_size_t)len);
-            gBenchWc = ml_io_map_wcomb((vm_offset_t)base, (vm_size_t)len);
-            DPGLOG("fbbench: ml_io_map %#lx, ml_io_map_wcomb %#lx over %#llx+%#llx (kept for the boot)", (unsigned long)gBenchUc,
+            gBenchWc = ml_io_map((vm_offset_t)base, (vm_size_t)len);
+            DPGLOG("fbbench: ml_io_map %#lx, ml_io_map (2nd) %#lx over %#llx+%#llx (kept for the boot)", (unsigned long)gBenchUc,
                    (unsigned long)gBenchWc, (unsigned long long)base, (unsigned long long)len);
         }
         if (gBenchBase == base && gBenchLen == len) {
@@ -2398,7 +2399,7 @@ uint32_t navi48_fbbench(uint64_t arg, uint64_t *out, unsigned count) {
                 // out slots 11 and 12 (reads of copyback / write-combine) are reused for these two: see the layout comment.
                 v[11 + m] = kib;
                 DPGLOG("fbbench: %s: %zu bytes WRITE best %llu us = %llu KiB/s", m == 0 ? "ml_io_map (uncached, WIMG 7)" :
-                       "ml_io_map_wcomb (WRITE-COMBINE, WIMG 6)", n, (unsigned long long)wbest, (unsigned long long)kib);
+                       "ml_io_map (2nd, uncached; wcomb unexported)", n, (unsigned long long)wbest, (unsigned long long)kib);
             }
         }
     }

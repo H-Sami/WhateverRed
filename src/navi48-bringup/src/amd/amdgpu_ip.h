@@ -20,6 +20,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "navi44_identity_pure.h"
 
 namespace amdgpu {
 
@@ -45,15 +46,19 @@ struct IPVersion {
     uint8_t rev;
 };
 
-constexpr IPVersion kIP_GFX  = { 12, 0, 1 };
-constexpr IPVersion kIP_GMC  = { 12, 0, 0 };
-constexpr IPVersion kIP_SDMA = { 7,  0, 1 };
-constexpr IPVersion kIP_PSP  = { 14, 0, 3 };
-constexpr IPVersion kIP_SMU  = { 14, 0, 3 };
-constexpr IPVersion kIP_MES  = { 12, 0, 1 };
-constexpr IPVersion kIP_NBIO = { 7,  11, 0 };
-constexpr IPVersion kIP_IH   = { 7,  0, 0 };
-constexpr IPVersion kIP_HDP  = { 7,  0, 0 };
+// WhateverRed (ticket #16): the pins come from the Navi 44 identity module, the one place the
+// card's discovery versions live (RX 9060 XT: GC 12.0.0, SDMA 7.0.0, MP0 / MP1 14.0.2, NBIF 6.3.1).
+// GMC and MES follow GC as Linux picks gmc_v12_0 / mes_v12_0 from it; IH is OSSSYS.
+static constexpr IPVersion ip_of(const n44id::IpVer &v) { return IPVersion{ v.major, v.minor, v.rev }; }
+constexpr IPVersion kIP_GFX  = ip_of(n44id::kGc);
+constexpr IPVersion kIP_GMC  = ip_of(n44id::kGc);
+constexpr IPVersion kIP_SDMA = ip_of(n44id::kSdma);
+constexpr IPVersion kIP_PSP  = ip_of(n44id::kPsp);
+constexpr IPVersion kIP_SMU  = ip_of(n44id::kSmu);
+constexpr IPVersion kIP_MES  = ip_of(n44id::kGc);
+constexpr IPVersion kIP_NBIO = ip_of(n44id::kNbif);
+constexpr IPVersion kIP_IH   = ip_of(n44id::kOsssys);
+constexpr IPVersion kIP_HDP  = ip_of(n44id::kHdp);
 
 // Hardware IP enum mirrors Linux amdgpu_ip_block.h.
 enum class IPBlock : uint8_t {

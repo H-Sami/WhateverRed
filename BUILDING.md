@@ -20,22 +20,27 @@
 
   ```
   git clone https://gitlab.com/kernel-firmware/linux-firmware.git
+  git -C linux-firmware checkout 2a12d06438f2092115b9cf53dca79258bf283f88
   tools/fetch-firmware.sh <path-to-that-checkout>
   ```
 
   This only copies files (no network) into `src/navi48-bringup/firmware/`, which is
-  gitignored. The kext embeds exactly these ten files from linux-firmware's `amdgpu/`:
+  gitignored. The kext embeds exactly these ten files from linux-firmware's `amdgpu/`
+  (the Navi 44 / RX 9060 XT set: GC 12.0.0, PSP 14.0.2, SMU 14.0.2, SDMA 7.0.0):
 
   ```
-  gc_12_0_1_imu.bin  gc_12_0_1_me.bin  gc_12_0_1_mec.bin  gc_12_0_1_pfp.bin
-  gc_12_0_1_rlc.bin  gc_12_0_1_uni_mes.bin
-  psp_14_0_3_sos.bin  psp_14_0_3_ta.bin
-  sdma_7_0_1.bin  smu_14_0_3.bin
+  gc_12_0_0_imu.bin  gc_12_0_0_me.bin  gc_12_0_0_mec.bin  gc_12_0_0_pfp.bin
+  gc_12_0_0_rlc.bin  gc_12_0_0_uni_mes.bin
+  psp_14_0_2_sos.bin  psp_14_0_2_ta.bin
+  sdma_7_0_0.bin  smu_14_0_2.bin
   ```
 
-  The Makefile stops with a list if any is missing. `tools/fetch-firmware.sh` prints the
-  sha256 of each copy against the revision the project was developed with; a different
-  linux-firmware revision may work, but only that one has been run.
+  The set is pinned to linux-firmware commit `2a12d06438f2092115b9cf53dca79258bf283f88`,
+  whose versions match Linux on this card (SMU 102.70.0, SOS 0x3b0f0d). `tools/fetch-firmware.sh`
+  refuses any copy whose sha256 differs, and `make` runs `check-firmware` first: a host
+  checker built from `src/amd/navi44_identity_pure.h` (`n44id::kFirmware`) that stops the
+  build on a missing blob or a version other than the pinned one. `make hosttest` then
+  runs the firmware-extraction host test against the same blobs.
 
 ## Build
 

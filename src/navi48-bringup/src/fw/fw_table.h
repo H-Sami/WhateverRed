@@ -40,7 +40,7 @@ enum class FwId : uint32_t {
 struct FwBlob {
     const uint8_t *data;  // nullptr if this id has no embedded blob
     size_t size;          // 0 if this id has no embedded blob
-    const char *name;     // bare blob name, e.g. "gc_12_0_1_imu"
+    const char *name;     // bare blob name, e.g. "gc_12_0_0_imu"
     FwId id;
 };
 
@@ -49,7 +49,7 @@ struct FwBlob {
 // check ->data for blobs with no embedded bytes (see FwId comment above).
 const FwBlob *fw_get(FwId id);
 
-// Looks up by bare name (e.g. "smu_14_0_3"); returns nullptr if not found.
+// Looks up by bare name (e.g. "smu_14_0_2"); returns nullptr if not found.
 const FwBlob *fw_find_by_name(const char *name);
 
 } // namespace amdgpu
