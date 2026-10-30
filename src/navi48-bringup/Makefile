@@ -23,10 +23,10 @@ CXX_SRCS := src/Navi48Bringup.cpp src/Navi48UserClient.cpp src/Navi48NativeClien
 FW_BINS  := $(wildcard firmware/*.bin)
 FW_SRCS  := $(patsubst firmware/%.bin,src/fw/fw_%.c,$(FW_BINS))
 # REQUIRED blobs: AMD firmware from linux-firmware, NOT in this repository (see BUILDING.md and
-# tools/fetch-firmware.sh). The kext cannot link without them, so fail early with a clear message.
-FW_REQUIRED := gc_12_0_1_imu gc_12_0_1_me gc_12_0_1_mec gc_12_0_1_pfp gc_12_0_1_rlc gc_12_0_1_uni_mes \
-               psp_14_0_3_sos psp_14_0_3_ta sdma_7_0_1 smu_14_0_3
-FW_MISSING  := $(filter-out $(patsubst firmware/%.bin,%,$(FW_BINS)),$(FW_REQUIRED))
+# tools/fetch-firmware.sh). Ticket #17: the set and its pinned versions live in the identity module
+# (src/amd/navi44_identity_pure.h, n44id::kFirmware); check-firmware builds a host checker from it
+# and fails before any object compiles on a missing blob or a version other than the pinned one.
+HOSTCXX := xcrun clang++
 # Our own compute test shaders, assembled from shaders/*.s (tools/build-shader.sh) and tracked as
 # shaders/*.bin so no LLVM is needed to build the kext.
 SHADER_FW      := shader_store_magic shader_store_magic_hsa
@@ -112,11 +112,18 @@ LDFLAGS  := -arch $(ARCH) -target $(ARCH)-apple-macos$(DEPLOY) -isysroot $(SDK) 
 all: $(KEXT)
 
 $(OBJS): | check-firmware
-check-firmware:
-	@if [ -n "$(FW_MISSING)" ]; then \
-	  echo "error: missing required firmware in firmware/: $(addsuffix .bin,$(FW_MISSING))"; \
-	  echo "       copy them from a linux-firmware checkout: tools/fetch-firmware.sh <path> (see BUILDING.md)"; exit 1; fi
-.PHONY: check-firmware
+$(BUILD)/check-firmware: hosttest/check_firmware.cpp src/amd/navi44_identity_pure.h
+	@mkdir -p $(dir $@)
+	$(HOSTCXX) -std=c++17 -Wall -Wextra -Werror -O1 -I src/amd hosttest/check_firmware.cpp -o $@
+check-firmware: $(BUILD)/check-firmware
+	@$(BUILD)/check-firmware firmware
+# The firmware-extraction host test (hosttest/main.cpp) against the blobs in firmware/.
+$(BUILD)/hosttest: hosttest/main.cpp src/amd/amdgpu_ucode_extract.cpp
+	@mkdir -p $(dir $@)
+	$(HOSTCXX) -std=c++17 -I hosttest/shim -I src -I src/amd hosttest/main.cpp src/amd/amdgpu_ucode_extract.cpp -o $@
+hosttest: check-firmware $(BUILD)/hosttest
+	@$(BUILD)/hosttest firmware
+.PHONY: check-firmware hosttest
 
 # Header dependency tracking (-MMD): a struct change in a shared header (e.g. DeviceContext
 # in amdgpu_regs.h) must rebuild EVERY module, or the kext links objects with mismatched

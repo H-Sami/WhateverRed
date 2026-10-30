@@ -387,8 +387,32 @@ crit_log() {   # crit_log REGEX <dir>
     if [ -n "$m" ]; then echo "PASS $m"; else echo "FAIL no log line matches /$1/"; fi
 }
 
+# crit_tmr_in_tail <dir> (ticket #17): the SOS-managed PSP TMR (query_fw_reservation's FB_FW_RESERV_ADDR
+# reply) must lie inside the VRAM tail the kext keeps from Apple (amdgpu::kVramHiTotalReserve, logged on
+# the "vram: vramLimit" line as "hi reserve N MiB"). SOS may answer with an MC address (FB base
+# 0x80_0000_0000) or a VRAM offset; the low 39 bits are the offset either way.
+crit_tmr_in_tail() {
+    local L v a vram res addr size off lo hi
+    L=$(grep -v "^$LOG_READ_OK " "$1/log.txt" 2>/dev/null)
+    v=$(printf '%s\n' "$L" | grep -E 'vram: vramLimit .*VRAM [0-9]+ MiB, hi reserve [0-9]+ MiB' | head -n 1)
+    vram=$(printf '%s\n' "$v" | sed -nE 's/.*VRAM ([0-9]+) MiB.*/\1/p')
+    res=$(printf '%s\n' "$v" | sed -nE 's/.*hi reserve ([0-9]+) MiB.*/\1/p')
+    a=$(printf '%s\n' "$L" | grep -E 'query_fw_reservation: FB_FW_RESERV_ADDR ok .*addr=0x[0-9a-fA-F]+ size=0x[0-9a-fA-F]+' | head -n 1)
+    addr=$(printf '%s\n' "$a" | sed -nE 's/.*addr=(0x[0-9a-fA-F]+).*/\1/p')
+    size=$(printf '%s\n' "$a" | sed -nE 's/.*size=(0x[0-9a-fA-F]+).*/\1/p')
+    if [ -z "$vram" ] || [ -z "$res" ]; then echo "FAIL no 'vram: vramLimit ... VRAM N MiB, hi reserve N MiB' line"; return; fi
+    if [ -z "$addr" ]; then echo "FAIL no 'query_fw_reservation: FB_FW_RESERV_ADDR ok ... addr= size=' line"; return; fi
+    off=$(( addr & 0x7fffffffff )); size=$(( size )); lo=$(( (vram - res) << 20 )); hi=$(( vram << 20 ))
+    if [ "$off" -eq 0 ] || [ "$size" -eq 0 ]; then echo "FAIL SOS reported no TMR (addr=$addr size=$(printf '%#x' "$size"))"
+    elif [ "$off" -ge "$lo" ] && [ $(( off + size )) -le "$hi" ]; then
+        printf 'PASS PSP TMR vram+%#x (+%#x) inside the reserved tail [%#x, %#x)\n' "$off" "$size" "$lo" "$hi"
+    else printf 'FAIL PSP TMR vram+%#x (+%#x) outside the reserved tail [%#x, %#x)\n' "$off" "$size" "$lo" "$hi"; fi
+}
+
 # Named expectation sets (--expect-preset NAME): one criterion per line, as --expect / --expect-log register them.
 #   navi44-stage1  ticket #16: attached to 1002:7590, stage 1 (IPDiscovery) reached, gc_info geometry 2/2/8/8 accepted
+#   navi44-stage9  ticket #17: stage 9 (SMUInit) reached, PMFW 102.70.0, BAR0 plan OK at 256 MiB with vramLimit
+#                  256 MiB, PSP TMR inside the reserved VRAM tail (console: the default console criterion)
 expect_preset() {
     case "$1" in
         navi44-stage1) cat <<'PRESET'
@@ -403,6 +427,18 @@ ioreg Navi48,GeometryCUPerSA=8
 ioreg Navi48,GeometryRB=8
 ioreg Navi48,Geometry=2/2/8/8
 ioreg Navi48,GeometryCheck=accepted
+PRESET
+        ;;
+        navi44-stage9) cat <<'PRESET'
+ioreg IOPCIPrimaryMatch=0x75901002
+log probe: Navi 44 RX 9060 XT \(0x7590\)
+ioreg Navi48,StageTarget=9
+ioreg Navi48,StageReached=9
+ioreg Navi48,StageReachedName=SMUInit
+ioreg SMU,FirmwareVersion=6702592
+log smu: PMFW version 102\.70\.0
+log vram: BAR0 plan: .* -> OK \(map 256 MiB, vramLimit 256 MiB\)
+tmr-in-tail
 PRESET
         ;;
         *) return 1 ;;

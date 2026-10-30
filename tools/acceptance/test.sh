@@ -178,6 +178,41 @@ printf '%s\n' '22:10:01 probe: 0x75501002 not Navi 44, ignoring' > "$C/log.txt"
 pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage1)"
 check "navi44-stage1 fails on a wrong RB count and no probe line" "2" "$pf"
 
+# the navi44-stage9 preset (ticket #17) against a capture of what stage 9 publishes and logs
+cat > "$C/ioreg.txt" <<'IOREG'
++-o Navi48Bringup  <class Navi48Bringup, id 0x100000abc, registered, matched, active, busy 0 (0 ms), retain 7>
+    {
+      "IOPCIPrimaryMatch" = "0x75901002"
+      "Navi48,StageTarget" = 9
+      "Navi48,StageReached" = 9
+      "Navi48,StageReachedName" = "SMUInit"
+      "SMU,FirmwareVersion" = 6702592
+    }
+IOREG
+S9LOG='22:10:01 probe: Navi 44 RX 9060 XT (0x7590) - bring-up enabled
+22:10:01 vram: BAR0 plan: IOPCIFamily [0x7000000000, +256 MiB), config space 0x7000000000, ReBAR none 256 MiB, VRAM 16304 MiB -> OK (map 256 MiB, vramLimit 256 MiB)
+22:10:01 vram: vramLimit 256 MiB (mapped 256 MiB, VRAM 16304 MiB, hi reserve 768 MiB)
+22:10:02 psp: query_fw_reservation: FB_FW_RESERV_ADDR ok (resp=0) addr=0x83f8600000 size=0x1000000
+22:10:03 smu: PMFW version 102.70.0'
+printf '%s\n' "$S9LOG" > "$C/log.txt"
+check "navi44-stage9 preset has 9 criteria" "9" "$(expect_preset navi44-stage9 | wc -l | tr -d ' ')"
+pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage9)"
+check "navi44-stage9 passes on a good stage-9 capture" "0" "$pf"
+printf '%s\n' "$S9LOG" | sed 's/addr=0x83f8600000/addr=0x3f8600000/' > "$C/log.txt"
+check_match "tmr-in-tail takes a plain VRAM offset too" "^PASS" "$(evaluate_criterion tmr-in-tail "$C")"
+printf '%s\n' "$S9LOG" | sed 's/addr=0x83f8600000/addr=0x8000200000/' > "$C/log.txt"
+check_match "tmr-in-tail fails on a TMR low in VRAM" "^FAIL .*outside" "$(evaluate_criterion tmr-in-tail "$C")"
+printf '%s\n' "$S9LOG" | sed 's/size=0x1000000/size=0x40000000/' > "$C/log.txt"
+check_match "tmr-in-tail fails on a TMR running past the end of VRAM" "^FAIL .*outside" "$(evaluate_criterion tmr-in-tail "$C")"
+printf '%s\n' "$S9LOG" | sed 's/addr=0x83f8600000 size=0x1000000/addr=0 size=0/' > "$C/log.txt"
+check_match "tmr-in-tail fails when SOS reports no reservation" "^FAIL" "$(evaluate_criterion tmr-in-tail "$C")"
+printf '%s\n' "$S9LOG" | grep -v query_fw_reservation > "$C/log.txt"
+check_match "tmr-in-tail fails without the reservation line" "^FAIL no 'query_fw" "$(evaluate_criterion tmr-in-tail "$C")"
+sed 's/"SMU,FirmwareVersion" = 6702592/"SMU,FirmwareVersion" = 6702848/' "$C/ioreg.txt" > "$C/i2" && mv "$C/i2" "$C/ioreg.txt"
+printf '%s\n' "$S9LOG" | sed -e 's/102\.70\.0/102.71.0/' -e 's/-> OK (map 256 MiB, vramLimit 256 MiB)/-> OK (map 256 MiB, vramLimit 128 MiB)/' > "$C/log.txt"
+pf=0; while IFS= read -r c; do case "$(evaluate_criterion "$c" "$C")" in PASS*) ;; *) pf=$((pf + 1)) ;; esac; done <<< "$(expect_preset navi44-stage9)"
+check "navi44-stage9 fails on PMFW 102.71.0 and a 128 MiB vramLimit" "3" "$pf"
+
 printf '%s\n' "$CLEAN" > "$C/nvram-after-disarm.txt"
 check_match "disarmed passes on clean NVRAM" "^PASS" "$(evaluate_criterion disarmed "$C")"
 printf '%s\n' "$CLEAN gfxrst=4" > "$C/nvram-after-disarm.txt"

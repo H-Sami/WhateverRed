@@ -8,7 +8,10 @@
 //   I3  gc_info: a hand-built IP discovery binary (v1.3 header, GC table v1.3) parses to 2 SE / 2 SA per SE / 8 CU per SA / 8 RB;
 //       v2 binary header and GC v2 layouts; a missing, truncated, mis-identified or mis-checksummed GC table is refused with its reason;
 //   I4  geometry check: the exact 2/2/8/8 is accepted; each field one above and one below is refused with that field's reason;
-//   I5  source pins of the REAL code: probe, Info.plist, amdgpu_ip.h and the stage-1 path consume this module.
+//   I5  source pins of the REAL code: probe, Info.plist, amdgpu_ip.h and the stage-1 path consume this module;
+//   I6  firmware (ticket #17): the Navi 44 name set, each blob's pinned version (SMU 102.70.0, SOS >= 0x3b0e0d), the set check,
+//       external_rev_id; N44_FIRMWARE_DIR=<dir> also checks a real firmware directory (never committed);
+//   I7  source pins: fw_table, stagePSP, the Makefile gate, fetch-firmware.sh, hosttest and the SOC / SMU deltas use this set.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -239,6 +242,127 @@ static void i4_geometry() {
     }
 }
 
+// A synthetic firmware file: common_firmware_header (size_bytes = file length, ip_version, ucode_version, crc32),
+// then for a PSP container the descriptor count and {type, version, offset, size} descriptors.
+struct Desc { uint32_t type, version; };
+static std::vector<uint8_t> fw_blob(uint16_t ipMajor, uint16_t ipMinor, uint32_t ucode, uint32_t crc = 0,
+                                    std::vector<Desc> descs = {}, size_t pad = 256) {
+    std::vector<uint8_t> b(36 + 16 * descs.size() + pad, 0);
+    auto w16 = [&](size_t o, uint32_t v) { b[o] = uint8_t(v); b[o + 1] = uint8_t(v >> 8); };
+    auto w32 = [&](size_t o, uint32_t v) { w16(o, v & 0xffff); w16(o + 2, v >> 16); };
+    w32(0, uint32_t(b.size())); w32(4, 36); w16(8, 2); w16(10, 0); w16(12, ipMajor); w16(14, ipMinor);
+    w32(16, ucode); w32(20, 64); w32(24, 0x100); w32(28, crc);
+    w32(32, uint32_t(descs.size()));
+    for (size_t i = 0; i < descs.size(); i++) { w32(36 + 16 * i, descs[i].type); w32(40 + 16 * i, descs[i].version); }
+    return b;
+}
+static uint32_t chk(const char *name, const std::vector<uint8_t> &b) { return n44id::check_firmware(name, b.data(), b.size()); }
+
+static void i6_firmware() {
+    using namespace n44id;
+    // The name set: upstream's Navi 44 blobs, and nothing else.
+    const char *want[] = { "gc_12_0_0_imu", "gc_12_0_0_me", "gc_12_0_0_mec", "gc_12_0_0_pfp", "gc_12_0_0_rlc", "gc_12_0_0_uni_mes",
+                           "psp_14_0_2_sos", "psp_14_0_2_ta", "sdma_7_0_0", "smu_14_0_2" };
+    expect_u("I6: the firmware set has ten blobs", kFirmwareCount, 10);
+    for (const char *n : want) expect(find_firmware(n) != nullptr, n);
+    for (const char *n : { "gc_12_0_1_me", "gc_12_0_1_uni_mes", "psp_14_0_3_sos", "psp_14_0_3_ta", "smu_14_0_3", "sdma_7_0_1",
+                           "gc_12_0_0_mes", "gc_12_0_0_mes1", "gc_12_0_0_toc", "psp_14_0_2_sos_kicker", "gc_12_0_0_rlc_kicker", "", "gc_12_0_0" })
+        expect(find_firmware(n) == nullptr, "I6: a Navi 48, split-MES, kicker or partial name is not in the set");
+    expect(find_firmware(nullptr) == nullptr, "I6: a null name is not in the set");
+    expect(std::strlen(kLinuxFirmwareCommit) == 40 && std::strcmp(kLinuxFirmwareCommit, "2a12d06438f2092115b9cf53dca79258bf283f88") == 0,
+           "I6: the linux-firmware commit is pinned by its full hash");
+
+    // Ucode-version blobs: the ground-truth version passes; one off, the wrong IP, or a truncated file is refused.
+    expect_u("I6: gc_12_0_0_me ME 0xbc2 passes", chk("gc_12_0_0_me", fw_blob(12, 0, 0xbc2)), kOk);
+    expect_u("I6: gc_12_0_0_me 0xbc3 is a version mismatch", chk("gc_12_0_0_me", fw_blob(12, 0, 0xbc3)), kFwVersionMismatch);
+    expect_u("I6: gc_12_0_0_pfp PFP 0xc12 passes", chk("gc_12_0_0_pfp", fw_blob(12, 0, 0xc12)), kOk);
+    expect_u("I6: gc_12_0_0_mec MEC 0xd0c passes", chk("gc_12_0_0_mec", fw_blob(12, 0, 0xd0c)), kOk);
+    expect_u("I6: gc_12_0_0_rlc 0x00bde160 passes", chk("gc_12_0_0_rlc", fw_blob(12, 0, 0x00bde160)), kOk);
+    expect_u("I6: gc_12_0_0_imu 0x0c2c2500 passes", chk("gc_12_0_0_imu", fw_blob(12, 0, 0x0c2c2500)), kOk);
+    expect_u("I6: sdma_7_0_0 0x00798e96 passes", chk("sdma_7_0_0", fw_blob(7, 0, 0x00798e96)), kOk);
+    expect_u("I6: gc_12_0_0_me with ip 11.0 is an IP mismatch", chk("gc_12_0_0_me", fw_blob(11, 0, 0xbc2)), kFwIpMismatch);
+    expect_u("I6: sdma_7_0_0 with ip 7.1 is an IP mismatch", chk("sdma_7_0_0", fw_blob(7, 1, 0x00798e96)), kFwIpMismatch);
+    {
+        std::vector<uint8_t> b = fw_blob(12, 0, 0xbc2);
+        expect_u("I6: a 16-byte file is truncated", n44id::check_firmware("gc_12_0_0_me", b.data(), 16), kFwTruncated);
+        expect_u("I6: a file shorter than its size_bytes is truncated", n44id::check_firmware("gc_12_0_0_me", b.data(), b.size() - 1), kFwTruncated);
+        expect_u("I6: no data is truncated", n44id::check_firmware("gc_12_0_0_me", nullptr, 0), kFwTruncated);
+    }
+    expect_u("I6: a good blob under a Navi 48 name is an unknown name", chk("gc_12_0_1_me", fw_blob(12, 0, 0xbc2)), kFwUnknownName);
+
+    // SMU 102.70.0; linux-firmware's later 102.71.0 is refused.
+    expect(smu_major(kSmuVersion) == 102 && smu_minor(kSmuVersion) == 70 && smu_patch(kSmuVersion) == 0, "I6: the pinned SMU is 102.70.0");
+    expect_u("I6: smu_14_0_2 0x00664600 (102.70.0) passes", chk("smu_14_0_2", fw_blob(14, 0, 0x00664600)), kOk);
+    expect_u("I6: smu_14_0_2 0x00664700 (102.71.0) is a version mismatch", chk("smu_14_0_2", fw_blob(14, 0, 0x00664700)), kFwVersionMismatch);
+
+    // uni_mes: ucode_version is 0, so the crc32 is pinned.
+    expect_u("I6: gc_12_0_0_uni_mes with crc32 0x1a2b3f08 passes", chk("gc_12_0_0_uni_mes", fw_blob(12, 0, 0, 0x1a2b3f08)), kOk);
+    expect_u("I6: gc_12_0_0_uni_mes with another crc32 is a mismatch", chk("gc_12_0_0_uni_mes", fw_blob(12, 0, 0, 0x1a2b3f09)), kFwVersionMismatch);
+
+    // SOS: the descriptor of type 1 is 0x3b0f0d (>= 0x3b0e0d).
+    const std::vector<Desc> sosOk = { { 3, 0x703b0001 }, { 2, 0x3b0f0d }, { 1, 0x3b0f0d }, { 4, 0 } };
+    expect(kSosMinForReservation == 0x3b0e0d && kSosVersion >= kSosMinForReservation, "I6: the pinned SOS is at least 0x3b0e0d");
+    expect_u("I6: psp_14_0_2_sos with SOS 0x3b0f0d passes", chk("psp_14_0_2_sos", fw_blob(14, 0, 0x3b0f0d, 0, sosOk)), kOk);
+    expect_u("I6: SOS 0x3b0e0c is too old", chk("psp_14_0_2_sos", fw_blob(14, 0, 0x3b0f0d, 0, { { 1, 0x3b0e0c } })), kFwSosTooOld);
+    expect_u("I6: SOS 0x3b0e0d meets the floor but is not the pinned version", chk("psp_14_0_2_sos", fw_blob(14, 0, 0x3b0f0d, 0, { { 1, 0x3b0e0d } })), kFwVersionMismatch);
+    expect_u("I6: a SOS container without an SOS descriptor is refused", chk("psp_14_0_2_sos", fw_blob(14, 0, 0x3b0f0d, 0, { { 2, 0x3b0f0d } })), kFwNoDescriptor);
+    {
+        std::vector<uint8_t> b = fw_blob(14, 0, 0x3b0f0d, 0, sosOk, 0);
+        b[32] = 200;   // a descriptor count running past the file
+        expect_u("I6: a descriptor count past the file is truncated", n44id::check_firmware("psp_14_0_2_sos", b.data(), b.size()), kFwTruncated);
+    }
+    expect_u("I6: psp_14_0_2_sos with ip 14.3 is an IP mismatch", chk("psp_14_0_2_sos", fw_blob(14, 3, 0x3b0f0d, 0, sosOk)), kFwIpMismatch);
+
+    // TA: ASD, HDCP and DTM each pinned.
+    const std::vector<Desc> taOk = { { 1, 0x21000110 }, { 4, 0x17000050 }, { 5, 0x1200001d } };
+    expect_u("I6: psp_14_0_2_ta with ASD/HDCP/DTM passes", chk("psp_14_0_2_ta", fw_blob(14, 0, 0, 0, taOk)), kOk);
+    expect_u("I6: TA with HDCP 0x17000051 is a mismatch", chk("psp_14_0_2_ta", fw_blob(14, 0, 0, 0, { { 1, 0x21000110 }, { 4, 0x17000051 }, { 5, 0x1200001d } })), kFwVersionMismatch);
+    expect_u("I6: TA without DTM is refused", chk("psp_14_0_2_ta", fw_blob(14, 0, 0, 0, { { 1, 0x21000110 }, { 4, 0x17000050 } })), kFwNoDescriptor);
+    expect_u("I6: TA ASD 0x21000110 is not mistaken for an old SOS", chk("psp_14_0_2_ta", fw_blob(14, 0, 0, 0, { { 1, 0x00000001 }, { 4, 0x17000050 }, { 5, 0x1200001d } })), kFwVersionMismatch);
+
+    // The whole set, through the loader seam.
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> good = {
+        { "gc_12_0_0_imu", fw_blob(12, 0, 0x0c2c2500) }, { "gc_12_0_0_me", fw_blob(12, 0, 0xbc2) }, { "gc_12_0_0_mec", fw_blob(12, 0, 0xd0c) },
+        { "gc_12_0_0_pfp", fw_blob(12, 0, 0xc12) }, { "gc_12_0_0_rlc", fw_blob(12, 0, 0x00bde160) }, { "gc_12_0_0_uni_mes", fw_blob(12, 0, 0, 0x1a2b3f08) },
+        { "psp_14_0_2_sos", fw_blob(14, 0, 0x3b0f0d, 0, sosOk) }, { "psp_14_0_2_ta", fw_blob(14, 0, 0, 0, taOk) },
+        { "sdma_7_0_0", fw_blob(7, 0, 0x00798e96) }, { "smu_14_0_2", fw_blob(14, 0, 0x00664600) },
+    };
+    auto loader = [](std::vector<std::pair<std::string, std::vector<uint8_t>>> &set) {
+        return [&set](const char *n, const uint8_t **d, size_t *len) {
+            for (auto &e : set) if (e.first == n) { *d = e.second.data(); *len = e.second.size(); return true; }
+            return false;
+        };
+    };
+    FwSetResult r = check_firmware_set(loader(good));
+    expect_u("I6: the pinned set passes", r.reason, kOk);
+    auto withSmu = good; withSmu[9].second = fw_blob(14, 0, 0x00664700);
+    r = check_firmware_set(loader(withSmu));
+    expect(r.reason == kFwVersionMismatch && r.index < kFirmwareCount && std::strcmp(kFirmware[r.index].name, "smu_14_0_2") == 0,
+           "I6: the set with linux-firmware tip's SMU fails on smu_14_0_2");
+    auto renamed = good; renamed[1].first = "gc_12_0_1_me";
+    r = check_firmware_set(loader(renamed));
+    expect(r.reason == kFwMissing && r.index < kFirmwareCount && std::strcmp(kFirmware[r.index].name, "gc_12_0_0_me") == 0,
+           "I6: the set with a Navi 48 name instead of gc_12_0_0_me reports gc_12_0_0_me missing");
+    for (uint32_t x : { kFwUnknownName, kFwMissing, kFwTruncated, kFwIpMismatch, kFwNoDescriptor, kFwSosTooOld, kFwVersionMismatch })
+        expect(std::strcmp(reason_name(x), "unknown") != 0, "I6: each firmware reason is named");
+
+    // SOC: external_rev_id = rev + 0x40 (Linux soc24.c for GC 12.0.0).
+    expect_u("I6: external_rev_id(0x00) is 0x40", external_rev_id(0x00), 0x40);
+    expect_u("I6: external_rev_id(0xc0) is 0x100 (no 8-bit wrap)", external_rev_id(0xc0), 0x100);
+
+    // Optional: a real firmware directory (never committed), e.g. src/navi48-bringup/firmware.
+    if (const char *dir = std::getenv("N44_FIRMWARE_DIR")) {
+        std::vector<std::pair<std::string, std::vector<uint8_t>>> real;
+        for (const char *n : want) {
+            const std::string s = slurp(std::string(dir) + "/" + n + ".bin");
+            if (!s.empty()) real.push_back({ n, std::vector<uint8_t>(s.begin(), s.end()) });
+        }
+        r = check_firmware_set(loader(real));
+        std::printf("note: %s: %s%s%s\n", dir, reason_name(r.reason), r.index < kFirmwareCount ? " at " : "", r.index < kFirmwareCount ? kFirmware[r.index].name : "");
+        expect_u("I6: the firmware directory passes the check", r.reason, kOk);
+    }
+}
+
 static void i5_pins(const std::string &root) {
     const std::string K = root + "/src/navi48-bringup/";
     const std::string b = slurp(K + "src/Navi48Bringup.cpp");
@@ -298,9 +422,64 @@ static void i5_pins(const std::string &root) {
     expect(has(suites, "$T/navi44_identity_test.cpp"), "I5: tools/conductor/suites.sh runs this test");
 }
 
+// I7: the real code consumes the firmware set (ticket #17), and the SOC / SMU deltas Linux applies on Navi 44 hold.
+static void i7_fw_pins(const std::string &root) {
+    using namespace n44id;
+    const std::string K = root + "/src/navi48-bringup/";
+    const std::string fwt = slurp(K + "src/amd/fw_table.cpp");
+    const std::string b = slurp(K + "src/Navi48Bringup.cpp");
+    const std::string mk = slurp(K + "Makefile");
+    const std::string ck = slurp(K + "hosttest/check_firmware.cpp");
+    const std::string ht = slurp(K + "hosttest/main.cpp");
+    const std::string fetch = slurp(root + "/tools/fetch-firmware.sh");
+    const std::string smu = slurp(K + "src/amd/smu_v14_0.cpp");
+    const std::string init = slurp(K + "src/amd/amdgpu_init.cpp");
+    expect(!fwt.empty() && !mk.empty() && !ck.empty() && !ht.empty() && !fetch.empty() && !smu.empty() && !init.empty(),
+           "I7: the firmware sources are readable (run from the repo root)");
+
+    // fw_table.cpp: every blob of the set is embedded and looked up under its Navi 44 name; no Navi 48 name is left.
+    for (const FwSpec &f : kFirmware) {
+        const std::string n = f.name;
+        expect(has(fwt, "extern const uint8_t fw_" + n + "[];") && has(fwt, "extern const size_t  fw_" + n + "_size;"), ("I7: fw_table.cpp declares fw_" + n).c_str());
+        expect(has(fwt, "FwBlob{ fw_" + n + ", fw_" + n + "_size, \"" + n + "\","), ("I7: fw_table.cpp has the " + n + " row").c_str());
+        expect(has(fetch, "\n" + n + " "), ("I7: tools/fetch-firmware.sh copies " + n).c_str());
+    }
+    for (const char *old : { "gc_12_0_1", "psp_14_0_3_", "smu_14_0_3", "sdma_7_0_1" }) {
+        expect(!has(fwt, old) && !has(b, old) && !has(mk, old) && !has(ht, old) && !has(fetch, old), "I7: no Navi 48 firmware name in fw_table / Navi48Bringup / Makefile / hosttest / fetch-firmware");
+    }
+    expect(has(b, "psp.parseContainer(fw_psp_14_0_2_sos, fw_psp_14_0_2_sos_size)"), "I7: stagePSP parses psp_14_0_2_sos");
+
+    // The build gate: check-firmware runs the identity module's checker before any object, and the set lives only there.
+    expect(has(mk, "$(OBJS): | check-firmware") && has(mk, "check-firmware: $(BUILD)/check-firmware") && has(mk, "@$(BUILD)/check-firmware firmware"),
+           "I7: make check-firmware runs the host checker on firmware/ before any object");
+    expect(has(mk, "hosttest/check_firmware.cpp src/amd/navi44_identity_pure.h"), "I7: the checker rebuilds when the identity module changes");
+    expect(!has(mk, "FW_REQUIRED"), "I7: the Makefile keeps no firmware name list of its own");
+    expect(has(ck, "#include \"navi44_identity_pure.h\"") && has(ck, "for (const n44id::FwSpec &f : n44id::kFirmware)") && has(ck, "n44id::check_firmware(f,") && has(ck, "return 1;"),
+           "I7: the checker walks n44id::kFirmware, checks each blob and fails");
+    expect(has(fetch, std::string("PINNED_COMMIT=") + kLinuxFirmwareCommit), "I7: tools/fetch-firmware.sh pins the module's linux-firmware commit");
+    expect(has(fetch, "rm -f \"$DST/$name.bin\"; bad=1") && !has(fetch, "copied anyway"), "I7: tools/fetch-firmware.sh refuses a sha256 mismatch");
+    for (const char *n : { "\"sdma_7_0_0.bin\"", "\"gc_12_0_0_rlc.bin\"", "\"gc_12_0_0_imu.bin\"", "\"gc_12_0_0_uni_mes.bin\"",
+                           "\"gc_12_0_0_pfp.bin\"", "\"gc_12_0_0_me.bin\"", "\"gc_12_0_0_mec.bin\"", "\"smu_14_0_2.bin\"" })
+        expect(has(ht, n), n);
+
+    // SOC / SMU, as Linux runs Navi 44: external_rev_id = rev + 0x40, no JPEG_DPG power gating, no energy accumulator,
+    // and EnableAllSmuFeatures only once, in smc_hw_setup (no reset-path EnableAllSmuFeatures / FEATURE_PWR_GFX).
+    const std::string pr = between(b, "IOService *Navi48Bringup::probe(IOService *provider, SInt32 *score) {", "\n}\n");
+    expect(has(pr, "n44id::external_rev_id(pciRev)") && has(pr, "\"Navi48,ExternalRevId\"") && has(pr, "configRead8(kIOPCIConfigRevisionID)"),
+           "I7: probe publishes Navi48,ExternalRevId through n44id::external_rev_id");
+    for (const std::string *s : { &smu, &init, &b }) {
+        expect(!has(*s, "JPEG_DPG") && !has(*s, "pg_flags"), "I7: no JPEG_DPG power gating");
+        expect(!has(*s, "EnergyAcc") && !has(*s, "energy_acc"), "I7: no energy accumulator");
+        expect(!has(*s, "PWR_GFX"), "I7: no FEATURE_PWR_GFX enable");
+    }
+    expect_u("I7: EnableAllSmuFeatures is sent once", count_of(smu, "smu_send_msg(dev, PPSMC::EnableAllSmuFeatures)") + count_of(init, "EnableAllSmuFeatures") + count_of(b, "PPSMC::EnableAllSmuFeatures"), 1);
+    expect(has(between(smu, "smu_smc_hw_setup(DeviceContext &dev, uint64_t driver_table_mc)", "\n}\n"), "smu_send_msg(dev, PPSMC::EnableAllSmuFeatures)"),
+           "I7: that one EnableAllSmuFeatures is in smu_smc_hw_setup");
+}
+
 int main(int argc, char **argv) {
     const std::string root = argc > 1 ? argv[1] : ".";
-    i1_device(); i2_versions(); i3_gc_info(); i4_geometry(); i5_pins(root);
+    i1_device(); i2_versions(); i3_gc_info(); i4_geometry(); i5_pins(root); i6_firmware(); i7_fw_pins(root);
     std::printf("navi44_identity_test: %d checks, %d failed\n", gRun, gFail);
     return gFail == 0 ? 0 : 1;
 }

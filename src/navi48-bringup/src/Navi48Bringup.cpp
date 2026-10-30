@@ -43,8 +43,8 @@
                                      // yields are both timed (mirrors AppleHardwareHook.cpp's n48_pol_ns)
 
 extern "C" {
-extern const uint8_t fw_psp_14_0_3_sos[];
-extern const size_t  fw_psp_14_0_3_sos_size;
+extern const uint8_t fw_psp_14_0_2_sos[];
+extern const size_t  fw_psp_14_0_2_sos_size;
 }
 
 OSDefineMetaClassAndStructors(Navi48Bringup, IOService)
@@ -627,7 +627,7 @@ void Navi48Bringup::stagePSP() {
 
 	HwBridge hw(this);
 	n48::PspLoader psp(hw);
-	if (!psp.parseContainer(fw_psp_14_0_3_sos, fw_psp_14_0_3_sos_size)) {
+	if (!psp.parseContainer(fw_psp_14_0_2_sos, fw_psp_14_0_2_sos_size)) {
 		N48LOG("psp-stage: embedded container failed to parse; aborting"); setProperty("PSP,Stage", "bad-container"); return;
 	}
 	setProperty("PSP,ContainerSOSVersion", static_cast<uint64_t>(psp.sosVersion()), 32);
@@ -7435,6 +7435,11 @@ IOService *Navi48Bringup::probe(IOService *provider, SInt32 *score) {
 		N48LOG("probe: 0x%08x not Navi 44, ignoring", vendorDevice); return nullptr;
 	}
 	N48LOG("probe: Navi 44 RX 9060 XT (0x%04x) — bring-up enabled", static_cast<unsigned>(vendorDevice >> 16));
+	// Ticket #17: Linux soc24 (GC 12.0.0) sets external_rev_id = rev_id + 0x40; published, consumed by nothing yet.
+	const uint8_t pciRev = pci->configRead8(kIOPCIConfigRevisionID);
+	setProperty("Navi48,PciRevision", static_cast<uint64_t>(pciRev), 32);
+	setProperty("Navi48,ExternalRevId", static_cast<uint64_t>(n44id::external_rev_id(pciRev)), 32);
+	N48LOG("probe: PCI revision %#x, external_rev_id %#x", static_cast<unsigned>(pciRev), static_cast<unsigned>(n44id::external_rev_id(pciRev)));
 	return this;
 }
 
